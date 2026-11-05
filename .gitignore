@@ -1,0 +1,16 @@
+# Flutter / Dart
+app/.dart_tool/
+app/build/
+app/.flutter-plugins*
+app/.packages
+*.iml
+.idea/
+
+# Node
+relayer/node_modules/
+relayer/dist/
+relayer/.env
+
+# Keys
+*.key
+.env
