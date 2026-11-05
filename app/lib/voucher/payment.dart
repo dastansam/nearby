@@ -55,22 +55,21 @@ class PaymentRequest {
   }
 }
 
-/// Payer side, offline: sign a voucher that pays exactly [request]. [saltHex] was cached while online.
-Future<Map<String, dynamic>> signPayment(SimpleKeyPair key, PaymentRequest request, String saltHex) => signVoucher(
+/// Payer side, offline: sign a voucher that pays exactly [request].
+Future<Map<String, dynamic>> signPayment(SimpleKeyPair key, PaymentRequest request) => signVoucher(
     key,
     [Transfer(request.receiverId, {request.token: request.amount})],
     DateTime.now().add(_voucherLifetime),
-    makeNonce(saltHex));
+    makeNonce());
 
 /// The payee's offline checks on a scanned voucher. Returns the voucher if it is a valid
 /// payment of exactly [request] that still has [minTimeToSettle] to run; otherwise the reason
-/// it was refused. [saltHex] is the payee's own cached intents.near salt.
+/// it was refused.
 ///
 /// The voucher is the payee's only claim on the money, so anything that would make
 /// intents.near pay someone else, pay less, or reject it must be refused here. Whether this
 /// voucher was already accepted is the store's call (VoucherStore.add).
-Future<({Map<String, dynamic>? voucher, String? reason})> checkPayment(
-    String qr, PaymentRequest request, String saltHex,
+Future<({Map<String, dynamic>? voucher, String? reason})> checkPayment(String qr, PaymentRequest request,
     {DateTime? now}) async {
   try {
     final v = jsonDecode(qr) as Map<String, dynamic>;
@@ -79,9 +78,6 @@ Future<({Map<String, dynamic>? voucher, String? reason})> checkPayment(
     // The contract takes standard base64 only; Dart would also decode the URL-safe alphabet.
     final nonce = v['payload']['nonce'] as String;
     if (base64.encode(base64.decode(nonce)) != nonce) return (voucher: null, reason: 'malformed');
-    // A nonce without the contract's salt never settles. If the two phones cached different
-    // salts one of them is stale, and the payee is the one who loses by guessing.
-    if (!nonceId(v).startsWith(saltHex)) return (voucher: null, reason: 'salt');
     final intents = jsonDecode(v['payload']['message'])['intents'] as List;
     if (intents.length != 1) return (voucher: null, reason: 'mismatch');
     final t = intents[0] as Map;

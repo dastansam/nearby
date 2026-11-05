@@ -67,16 +67,6 @@ class _HomeScreenState extends State<HomeScreen> {
     if (mounted) setState(() => _vouchers = vouchers);
   }
 
-  Future<void> _refreshSalt() async {
-    final messenger = ScaffoldMessenger.of(context);
-    try {
-      await _wallet!.refreshSalt();
-      if (mounted) setState(() {});
-    } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text('Refresh failed, are you online? ($e)')));
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final wallet = _wallet;
@@ -92,18 +82,12 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
       );
     }
-    final salt = wallet.salt;
     return Scaffold(
       appBar: AppBar(title: const Text('NearBy')),
       body: Column(children: [
         ListTile(
           title: const Text('Offline account'),
           subtitle: SelectableText(wallet.accountId),
-        ),
-        ListTile(
-          title: Text(salt == null ? 'Not ready for offline payments' : 'Ready for offline payments'),
-          subtitle: Text(salt == null ? 'Go online and tap refresh' : 'Salt $salt'),
-          trailing: IconButton(icon: const Icon(Icons.refresh), onPressed: _refreshSalt),
         ),
         Padding(
           padding: const EdgeInsets.all(16),
@@ -117,18 +101,8 @@ class _HomeScreenState extends State<HomeScreen> {
             const SizedBox(width: 16),
             Expanded(
               child: FilledButton.tonal(
-                onPressed: () {
-                  // The payee checks each voucher's nonce against its own cached salt.
-                  if (salt == null) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Go online once and tap refresh before receiving offline')));
-                    return;
-                  }
-                  _flow(() => Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                          builder: (_) => ReceiveScreen(accountId: wallet.accountId, salt: salt, store: _store))));
-                },
+                onPressed: () => _flow(() => Navigator.push(context,
+                    MaterialPageRoute(builder: (_) => ReceiveScreen(accountId: wallet.accountId, store: _store)))),
                 child: const Text('Receive'),
               ),
             ),

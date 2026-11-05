@@ -13,9 +13,6 @@ Future<void> pay(BuildContext context, Wallet wallet, VoucherStore store) async 
   final messenger = ScaffoldMessenger.of(context);
   void say(String text) => messenger.showSnackBar(SnackBar(content: Text(text)));
 
-  final salt = wallet.salt;
-  if (salt == null) return say('Go online once and tap refresh before paying offline');
-
   final qr = await scanQr(context, 'Scan the payment request');
   if (qr == null || !context.mounted) return;
   final request = PaymentRequest.decode(qr);
@@ -34,7 +31,7 @@ Future<void> pay(BuildContext context, Wallet wallet, VoucherStore store) async 
   );
   if (confirmed != true) return;
 
-  final voucher = await signPayment(wallet.key, request, salt);
+  final voucher = await signPayment(wallet.key, request);
   await store.add(voucher, sent: true);
   if (!context.mounted) return;
   await Navigator.push(context, MaterialPageRoute(builder: (_) => VoucherScreen(voucher: voucher)));

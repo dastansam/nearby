@@ -11,6 +11,7 @@ relayer/node_modules/
 relayer/dist/
 relayer/.env
 
-# Keys
+# Keys, and signed vouchers: anyone holding one can submit it
+relayer/voucher.json
 *.key
 .env

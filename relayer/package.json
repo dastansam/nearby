@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "test": "tsx --test src/*.test.ts",
-    "salt-test": "tsx scripts/salt-test.ts"
+    "settle-test": "tsx scripts/settle-test.ts"
   },
   "dependencies": {
     "@noble/curves": "^1.4.0",

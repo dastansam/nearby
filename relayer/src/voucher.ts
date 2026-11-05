@@ -28,14 +28,19 @@ export interface SignedVoucher {
   signature: string; // ed25519:<base58>
 }
 
-/** 32-byte nonce = 4-byte contract salt (hex from `current_salt`) + 28 random bytes. */
-export function makeNonce(saltHex: string): Uint8Array {
-  const salt = Buffer.from(saltHex, "hex");
-  if (salt.length !== 4) throw new Error("salt must be 4 bytes");
-  const n = new Uint8Array(32);
-  n.set(salt, 0);
-  n.set(randomBytes(28), 4);
-  return n;
+/**
+ * intents.near reads a nonce that starts with these bytes as its salted, expiring layout and then
+ * checks the salt and a second deadline inside it. Any other 32 bytes are a plain nonce with no
+ * such conditions, which is what we sign: nothing to fetch, so it works fully offline.
+ */
+export const VERSIONED_NONCE_PREFIX = "5628f6c6";
+
+/** 32 random bytes. Unordered: vouchers settle in any order. */
+export function makeNonce(): Uint8Array {
+  for (;;) {
+    const n = randomBytes(32);
+    if (!Buffer.from(n).toString("hex").startsWith(VERSIONED_NONCE_PREFIX)) return n;
+  }
 }
 
 function borshU32(n: number): Uint8Array {
@@ -86,6 +91,9 @@ export function verifyVoucher(v: SignedVoucher, now = new Date()): VerifyResult 
   const nonce = Buffer.from(v.payload.nonce, "base64");
   const hash = nep413Hash(v.payload.message, nonce, v.payload.recipient);
   if (!ed25519.verify(sig, hash, pub)) return { ok: false, reason: "signature" };
+  // A versioned nonce settles only if its salt is still valid and its own deadline has not passed.
+  // Neither can be checked offline, so plain nonces only.
+  if (nonce.toString("hex").startsWith(VERSIONED_NONCE_PREFIX)) return { ok: false, reason: "nonce" };
   const msg = JSON.parse(v.payload.message) as IntentMessage;
   if (msg.signer_id !== implicitAccount(pub)) return { ok: false, reason: "signer_id" };
   if (new Date(msg.deadline) <= now) return { ok: false, reason: "expired" };

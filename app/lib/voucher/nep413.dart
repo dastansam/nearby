@@ -14,12 +14,18 @@ const _nep413Tag = 2147484061; // 2^31 + 413
 
 final _ed = Ed25519();
 
-/// 32-byte nonce = 4-byte contract salt + 28 random bytes. Unordered: vouchers settle in any order.
-Uint8List makeNonce(String saltHex) {
-  final salt = hex.decode(saltHex);
-  if (salt.length != 4) throw ArgumentError('salt must be 4 bytes');
+/// intents.near reads a nonce that starts with these bytes as its salted, expiring layout and
+/// then checks the salt and a second deadline inside it. Any other 32 bytes are a plain nonce
+/// with no such conditions, which is what we sign: nothing to fetch, so it works fully offline.
+const versionedNoncePrefix = '5628f6c6';
+
+/// 32 random bytes. Unordered: vouchers settle in any order.
+Uint8List makeNonce() {
   final rnd = Random.secure();
-  return Uint8List.fromList([...salt, ...List.generate(28, (_) => rnd.nextInt(256))]);
+  while (true) {
+    final nonce = Uint8List.fromList(List.generate(32, (_) => rnd.nextInt(256)));
+    if (!hex.encode(nonce).startsWith(versionedNoncePrefix)) return nonce;
+  }
 }
 
 Uint8List _u32(int n) => Uint8List(4)..buffer.asByteData().setUint32(0, n, Endian.little);
@@ -80,6 +86,9 @@ Future<String?> verifyVoucher(Map<String, dynamic> v, {DateTime? now}) async {
   final ok = await _ed.verify(hash,
       signature: Signature(sig, publicKey: SimplePublicKey(pub, type: KeyPairType.ed25519)));
   if (!ok) return 'signature';
+  // A versioned nonce settles only if its salt is still valid and its own deadline has not
+  // passed. Neither can be checked offline, so plain nonces only.
+  if (nonceId(v).startsWith(versionedNoncePrefix)) return 'nonce';
   final msg = jsonDecode(p['message']) as Map<String, dynamic>;
   if (msg['signer_id'] != implicitAccount(pub)) return 'signer_id';
   final deadline = DateTime.parse(msg['deadline']);

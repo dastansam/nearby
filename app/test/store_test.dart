@@ -17,7 +17,7 @@ void main() {
 
   setUp(() async {
     store = await VoucherStore.open(inMemoryDatabasePath);
-    voucher = await signPayment(await Ed25519().newKeyPair(), request, '252812b3');
+    voucher = await signPayment(await Ed25519().newKeyPair(), request);
   });
 
   // The chain settles each nonce once. A payee who accepts the same voucher twice has handed

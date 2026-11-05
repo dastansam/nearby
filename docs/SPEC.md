@@ -2,6 +2,8 @@
 
 Local copy of the living spec at https://claude.ai/artifact/WL5vbTkHi7PiMb4KZXe9Yv (rev 25, copied 2026-11-05). If the two differ, the living spec is newer unless this file says otherwise.
 
+**This file is newer on the nonce format (2026-11-06).** The contract source and mainnet `simulate_intents` show the salt applies only to nonces that start with `5628f6c6`. We sign plain 32-byte random nonces, so there is no salt to fetch or go stale. See "Parallel nonces" and the first two rows of the risk table.
+
 We ship a Flutter app that pays with no internet. The payer signs a NEAR transfer on the phone, nearby phones relay it hop by hop over Bluetooth, and the first phone with a signal settles it on NEAR. Deadline: Nov 14, 23:59 UTC, 9 days from today.
 
 ## Overview
@@ -58,7 +60,7 @@ The voucher is a standard NEAR Intents `transfer` intent, signed with NEP-413. W
   "standard": "nep413",
   "payload": {
     "recipient": "intents.near",
-    "nonce": "<base64, 32 bytes: 4-byte contract salt + 28 bytes unique>",
+    "nonce": "<base64, 32 random bytes, not starting with 5628f6c6>",
     "message": "{\"signer_id\":\"<payer implicit hex>\",\"deadline\":\"2026-11-12T10:00:00Z\",\"intents\":[{\"intent\":\"transfer\",\"receiver_id\":\"merchant.near\",\"tokens\":{\"nep141:<usdc contract>\":\"2500000\"},\"memo\":\"seq:17 prev:<hash>\"}]}"
   },
   "public_key": "ed25519:<base58>",
@@ -68,7 +70,9 @@ The voucher is a standard NEAR Intents `transfer` intent, signed with NEP-413. W
 
 The memo carries a per-payer sequence number and the previous voucher's hash. Only the apps check that chain, to detect double-spending (see the next section). It never forces vouchers to settle in order.
 
-**Parallel nonces.** Intents nonces are unordered: the 28 unique bytes "can be random or sequential, as long as it's never reused for the same account" ([signing](https://docs.near-intents.org/integration/verifier-contract/signing-intents)). A payer can sign many vouchers offline in parallel, and each settles on its own, in any order. Plain NEAR transactions can't do this, because an access key's nonce must strictly increase.
+**Parallel nonces.** Intents nonces are unordered: any 32 bytes not yet used by that account. A payer can sign many vouchers offline in parallel, and each settles on its own, in any order. Plain NEAR transactions can't do this, because an access key's nonce must strictly increase.
+
+**Nonce layouts.** `intents.near` has two (`contracts/defuse/core/src/engine/mod.rs` in [near/intents](https://github.com/near/intents), `verify_intent_nonce`). A nonce starting with `5628f6c6` is *versioned*: prefix, version byte, 4-byte salt, 8-byte deadline, 15 random bytes. The salt must be in the contract's registry and the nonce deadline must be at or after the intent deadline. Any other 32 bytes are a plain nonce with no extra checks. We sign plain nonces, and the payee refuses versioned ones because it cannot check a salt or registry offline.
 
 ## Security and double-spend model
 
@@ -147,8 +151,9 @@ The video is 2 minutes, filmed with three phones: Payer (A), Merchant (B) and Ga
 
 | Risk | Impact | Fallback |
 | --- | --- | --- |
-| The nonce embeds a 4-byte salt. The docs say only that it "rotates periodically" and must match "one of the salts in the contract's registry"; how long an old salt stays valid isn't documented | High: an offline voucher could go stale | Read the salt module in the defuse contract source, then sign with today's salt and submit 24 h later on mainnet. Too short → our own small settlement contract |
-| `deadline` enforcement isn't documented | Medium | Test expiry along with the salt |
+| ~~Salt in the nonce goes stale~~ Resolved 2026-11-06: plain nonces carry no salt (mainnet accepts one with a bogus salt prefix). For versioned nonces, old salts stay valid until the contract's DAO or salt manager invalidates them; there is no time-based expiry | Low: a contract upgrade could stop accepting plain nonces | Switch the signers to the versioned layout and cache `current_salt` at top-up |
+| ~~`deadline` enforcement isn't documented~~ Confirmed 2026-11-06: mainnet rejects a past deadline ("deadline has expired") and a deadline without a time zone | None | — |
+| No voucher has settled yet: checks so far are `simulate_intents` with an unfunded key | High until done | `npm run settle-test` with a funded offline account, signed now and submitted a day later |
 | Integrating libqaul into our Flutter app (FFI, build setup) takes longer than planned | High: the solo time budget | Use qaul's own app as the transport and pass vouchers between apps by share intent; QR as the last resort |
 | qaul's BLE path is less mature than Wi-Fi | Medium | Demo on a phone hotspot Wi-Fi with no internet uplink |
 | Exact `execute_intents` argument shape | Low | Read the verifier Rust docs; copy from a known relayer |

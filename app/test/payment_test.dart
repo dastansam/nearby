@@ -22,7 +22,7 @@ void main() {
     Uint8List? nonce,
   }) async =>
       jsonEncode(await signVoucher(payer, intents ?? [Transfer(receiver, tokens, memo: 'seq:1 prev:00')],
-          deadline ?? now.add(const Duration(hours: 72)), nonce ?? makeNonce('252812b3')));
+          deadline ?? now.add(const Duration(hours: 72)), nonce ?? makeNonce()));
 
   /// Signs an arbitrary message the way a hostile payer app could, bypassing signVoucher.
   Future<String> handSignedQr(Map<String, dynamic> message, {String? nonceBase64}) async {
@@ -43,14 +43,14 @@ void main() {
     'tokens': {usdcToken: '2500000'},
   };
 
-  Future<String?> reasonFor(String qr) async => (await checkPayment(qr, request, '252812b3', now: now)).reason;
+  Future<String?> reasonFor(String qr) async => (await checkPayment(qr, request, now: now)).reason;
 
   // The payee hands over goods on the strength of these checks alone: there is no network
   // to ask. Each refusal below is a way the voucher would fail to pay this payee in full.
   // (Refusing a voucher shown twice is the store's job: see store_test.dart.)
   group('payee accepts a voucher only if it will pay them', () {
     test('accepts what the payer app signs for the request', () async {
-      final check = await checkPayment(jsonEncode(await signPayment(payer, request, '252812b3')), request, '252812b3');
+      final check = await checkPayment(jsonEncode(await signPayment(payer, request)), request);
       expect(check.reason, isNull);
       expect(amountOf(check.voucher!), '2500000');
     });
@@ -93,9 +93,11 @@ void main() {
       expect(await reasonFor(await voucherQr(deadline: now.add(minTimeToSettle + const Duration(minutes: 1)))), isNull);
     });
 
-    test('refuses a nonce without the salt the payee knows', () async {
-      // intents.near rejects a nonce whose salt is not in its registry, so this never settles.
-      expect(await reasonFor(await voucherQr(nonce: makeNonce('00000000'))), 'salt');
+    test('refuses a versioned nonce, whose salt and expiry cannot be checked offline', () async {
+      // Mainnet rejects "5628f6c6 + version + salt + deadline" nonces with "invalid salt" or
+      // "deadline is greater than nonce". A payer could craft one that looks fine and never settles.
+      final crafted = Uint8List.fromList([0x56, 0x28, 0xf6, 0xc6, 0, ...List.filled(27, 7)]);
+      expect(await reasonFor(await voucherQr(nonce: crafted)), 'nonce');
     });
 
     // Dart's parsers accept more than the contract's. Each of these is correctly signed and
