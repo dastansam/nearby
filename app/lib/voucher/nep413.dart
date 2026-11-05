@@ -37,6 +37,10 @@ Uint8List nep413Hash(String message, Uint8List nonce, String recipient) {
 
 String implicitAccount(List<int> pub) => hex.encode(pub);
 
+/// Canonical id of a voucher's nonce: hex of its bytes, not the base64 string, which has
+/// more than one spelling for the same bytes ("/" and "_" decode alike). The storage key.
+String nonceId(Map<String, dynamic> v) => hex.encode(base64.decode(v['payload']['nonce']));
+
 class Transfer {
   final String receiverId;
   final Map<String, String> tokens; // {"nep141:usdc.near": "2500000"}
@@ -52,7 +56,8 @@ Future<Map<String, dynamic>> signVoucher(
   // Key order matches the TS reference so both sides hash the same string.
   final message = jsonEncode({
     'signer_id': implicitAccount(pub),
-    'deadline': deadline.toUtc().toIso8601String(),
+    // Millisecond precision like JS toISOString(), the format checked against intents.near.
+    'deadline': DateTime.fromMillisecondsSinceEpoch(deadline.millisecondsSinceEpoch, isUtc: true).toIso8601String(),
     'intents': intents.map((i) => i.toJson()).toList(),
   });
   final sig = await _ed.sign(nep413Hash(message, nonce, verifyingContract), keyPair: key);

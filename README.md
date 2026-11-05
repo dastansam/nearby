@@ -20,6 +20,7 @@ Offline payments relayed phone-to-phone over the [qaul](https://qaul.net) mesh a
 | `relayer/` | TypeScript service: receives vouchers, calls `execute_intents`, signs balance attestations |
 | `relayer/scripts/salt-test.ts` | Gate 1: sign a voucher now, submit it later, see whether it settles |
 | `docs/` | Spec and threat model |
+| `testdata/` | Voucher test vector shared by the Dart and TypeScript signers |
 
 ## Status
 

@@ -1,0 +1,28 @@
+{
+  "seed_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+  "nonce_hex": "252812b307070707070707070707070707070707070707070707070707070707",
+  "message": {
+    "signer_id": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    "deadline": "2026-11-12T10:00:00.000Z",
+    "intents": [
+      {
+        "intent": "transfer",
+        "receiver_id": "merchant.near",
+        "tokens": {
+          "nep141:usdc.near": "2500000"
+        },
+        "memo": "seq:17 prev:00"
+      }
+    ]
+  },
+  "voucher": {
+    "standard": "nep413",
+    "payload": {
+      "message": "{\"signer_id\":\"8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c\",\"deadline\":\"2026-11-12T10:00:00.000Z\",\"intents\":[{\"intent\":\"transfer\",\"receiver_id\":\"merchant.near\",\"tokens\":{\"nep141:usdc.near\":\"2500000\"},\"memo\":\"seq:17 prev:00\"}]}",
+      "nonce": "JSgSswcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+      "recipient": "intents.near"
+    },
+    "public_key": "ed25519:AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+    "signature": "ed25519:2g8zV63t6jrWsMzLmorMcXUh1XHohBcsauzA1nz8MXWPaB1dRXNSHh7XMV4MNLYpzPRVhPLaN9as2KgSvWd1UxbT"
+  }
+}
