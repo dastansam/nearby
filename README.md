@@ -1,8 +1,8 @@
-# MeshPay
+# NearBy
 
 Offline payments relayed phone-to-phone over the [qaul](https://qaul.net) mesh and settled on NEAR through [NEAR Intents](https://docs.near-intents.org).
 
-> Pay like cash, settle like crypto.
+> Pay anyone nearby, even with no signal. Settled on NEAR.
 
 ## How it works
 
