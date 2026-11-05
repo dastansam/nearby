@@ -91,12 +91,18 @@ export function verifyVoucher(v: SignedVoucher, now = new Date()): VerifyResult 
   const nonce = Buffer.from(v.payload.nonce, "base64");
   const hash = nep413Hash(v.payload.message, nonce, v.payload.recipient);
   if (!ed25519.verify(sig, hash, pub)) return { ok: false, reason: "signature" };
+  // Node decodes URL-safe base64 too; the contract takes the standard alphabet only.
+  if (nonce.toString("base64") !== v.payload.nonce) return { ok: false, reason: "malformed" };
   // A versioned nonce settles only if its salt is still valid and its own deadline has not passed.
   // Neither can be checked offline, so plain nonces only.
   if (nonce.toString("hex").startsWith(VERSIONED_NONCE_PREFIX)) return { ok: false, reason: "nonce" };
   const msg = JSON.parse(v.payload.message) as IntentMessage;
   if (msg.signer_id !== implicitAccount(pub)) return { ok: false, reason: "signer_id" };
-  if (new Date(msg.deadline) <= now) return { ok: false, reason: "expired" };
+  // Exactly the UTC millisecond form we sign: the contract rejects a zone-less deadline, and an
+  // unparseable one would compare as "not expired".
+  const deadline = new Date(msg.deadline);
+  if (Number.isNaN(deadline.getTime()) || deadline.toISOString() !== msg.deadline) return { ok: false, reason: "deadline" };
+  if (deadline <= now) return { ok: false, reason: "expired" };
   return { ok: true, message: msg };
 }
 

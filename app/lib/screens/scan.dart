@@ -18,7 +18,8 @@ class _ScanScreenState extends State<ScanScreen> {
         appBar: AppBar(title: Text(widget.title)),
         body: MobileScanner(onDetect: (capture) {
           final value = capture.barcodes.firstOrNull?.rawValue;
-          if (value == null || _done) return;
+          // After the user backs out, the camera can still fire once; popping then would close the screen beneath.
+          if (value == null || _done || !(ModalRoute.of(context)?.isCurrent ?? false)) return;
           _done = true;
           Navigator.pop(context, value);
         }),

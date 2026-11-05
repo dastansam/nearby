@@ -56,44 +56,56 @@ class Transfer {
       {'intent': 'transfer', 'receiver_id': receiverId, 'tokens': tokens, if (memo != null) 'memo': memo};
 }
 
+/// UTC with millisecond precision, like JS toISOString(): the deadline format checked against intents.near.
+String _isoMillis(DateTime t) => DateTime.fromMillisecondsSinceEpoch(t.millisecondsSinceEpoch, isUtc: true).toIso8601String();
+
+/// The exact JSON string that gets signed. Key order matches the TS reference so both sides
+/// hash the same bytes.
+String intentMessage(String signerId, List<Transfer> intents, DateTime deadline) => jsonEncode({
+      'signer_id': signerId,
+      'deadline': _isoMillis(deadline),
+      'intents': intents.map((i) => i.toJson()).toList(),
+    });
+
+Map<String, dynamic> _envelope(String message, List<int> nonce, List<int> pub, List<int> sig) => {
+      'standard': 'nep413',
+      'payload': {'message': message, 'nonce': base64.encode(nonce), 'recipient': verifyingContract},
+      'public_key': 'ed25519:${base58.encode(Uint8List.fromList(pub))}',
+      'signature': 'ed25519:${base58.encode(Uint8List.fromList(sig))}',
+    };
+
 Future<Map<String, dynamic>> signVoucher(
     SimpleKeyPair key, List<Transfer> intents, DateTime deadline, Uint8List nonce) async {
   final pub = (await key.extractPublicKey()).bytes;
-  // Key order matches the TS reference so both sides hash the same string.
-  final message = jsonEncode({
-    'signer_id': implicitAccount(pub),
-    // Millisecond precision like JS toISOString(), the format checked against intents.near.
-    'deadline': DateTime.fromMillisecondsSinceEpoch(deadline.millisecondsSinceEpoch, isUtc: true).toIso8601String(),
-    'intents': intents.map((i) => i.toJson()).toList(),
-  });
+  final message = intentMessage(implicitAccount(pub), intents, deadline);
   final sig = await _ed.sign(nep413Hash(message, nonce, verifyingContract), keyPair: key);
-  return {
-    'standard': 'nep413',
-    'payload': {'message': message, 'nonce': base64.encode(nonce), 'recipient': verifyingContract},
-    'public_key': 'ed25519:${base58.encode(Uint8List.fromList(pub))}',
-    'signature': 'ed25519:${base58.encode(Uint8List.fromList(sig.bytes))}',
-  };
+  return _envelope(message, nonce, pub, sig.bytes);
 }
 
 /// Offline merchant checks. Returns null if valid, else the reason.
+///
+/// Dart's decoders accept spellings the contract's do not (URL-safe base64, a misplaced key
+/// tag, loose date formats) and ignore fields the contract hashes (callback_url). So beyond a
+/// valid signature, the voucher must be exactly what [signVoucher] emits: anything else might
+/// verify here and still be unparseable at settlement.
 Future<String?> verifyVoucher(Map<String, dynamic> v, {DateTime? now}) async {
   if (v['standard'] != 'nep413') return 'standard';
   final p = v['payload'] as Map<String, dynamic>;
   if (p['recipient'] != verifyingContract) return 'recipient';
   final pub = base58.decode((v['public_key'] as String).replaceFirst('ed25519:', ''));
   final sig = base58.decode((v['signature'] as String).replaceFirst('ed25519:', ''));
-  final hash = nep413Hash(p['message'], base64.decode(p['nonce']), p['recipient']);
-  final ok = await _ed.verify(hash,
+  final nonce = base64.decode(p['nonce']);
+  final ok = await _ed.verify(nep413Hash(p['message'], nonce, verifyingContract),
       signature: Signature(sig, publicKey: SimplePublicKey(pub, type: KeyPairType.ed25519)));
   if (!ok) return 'signature';
+  if (jsonEncode(v) != jsonEncode(_envelope(p['message'], nonce, pub, sig))) return 'malformed';
   // A versioned nonce settles only if its salt is still valid and its own deadline has not
   // passed. Neither can be checked offline, so plain nonces only.
   if (nonceId(v).startsWith(versionedNoncePrefix)) return 'nonce';
   final msg = jsonDecode(p['message']) as Map<String, dynamic>;
   if (msg['signer_id'] != implicitAccount(pub)) return 'signer_id';
   final deadline = DateTime.parse(msg['deadline']);
-  // Without a zone Dart reads local time, but the contract's RFC 3339 parser rejects it outright.
-  if (!deadline.isUtc) return 'deadline';
+  if (_isoMillis(deadline) != msg['deadline']) return 'deadline';
   if (!deadline.isAfter(now ?? DateTime.now())) return 'expired';
   return null;
 }

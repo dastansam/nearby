@@ -25,8 +25,16 @@ test("rejects a tampered amount", () => {
 });
 
 test("rejects an expired voucher", () => {
-  const v = signVoucher(sk, { ...msg, deadline: "2020-01-01T00:00:00Z" }, makeNonce());
+  const v = signVoucher(sk, { ...msg, deadline: "2020-01-01T00:00:00.000Z" }, makeNonce());
   assert.equal(verifyVoucher(v).reason, "expired");
+});
+
+// The contract rejects these at settlement, after the relayer has paid gas. "garbage" used to
+// pass outright, because an invalid date is never "<= now".
+test("rejects a deadline that is not the UTC form we sign", () => {
+  for (const deadline of ["garbage", "2099-01-01T00:00:00", "20990101T000000Z"]) {
+    assert.equal(verifyVoucher(signVoucher(sk, { ...msg, deadline }, makeNonce())).reason, "deadline", deadline);
+  }
 });
 
 // Mainnet rejects "5628f6c6 + version + salt + deadline" nonces with "invalid salt" or "deadline is

@@ -13,12 +13,15 @@ const RPC = process.env.NEAR_RPC ?? "https://rpc.mainnet.near.org";
 
 const mode = process.argv[2];
 if (mode === "sign") {
-  const sk = Buffer.from(process.env.OFFLINE_SK!, "hex");
+  const { OFFLINE_SK, RECEIVER, TOKEN, AMOUNT } = process.env;
+  // A missing value would sign a voucher that only fails at submit, a day later.
+  if (!OFFLINE_SK || !RECEIVER || !TOKEN || !AMOUNT) throw new Error("set OFFLINE_SK, RECEIVER, TOKEN and AMOUNT");
+  const sk = Buffer.from(OFFLINE_SK, "hex");
   const signer = implicitAccount(ed25519.getPublicKey(sk));
   const v = signVoucher(sk, {
     signer_id: signer,
     deadline: new Date(Date.now() + 72 * 3600e3).toISOString(),
-    intents: [{ intent: "transfer", receiver_id: process.env.RECEIVER!, tokens: { [process.env.TOKEN!]: process.env.AMOUNT! } }],
+    intents: [{ intent: "transfer", receiver_id: RECEIVER, tokens: { [TOKEN]: AMOUNT } }],
   }, makeNonce());
   writeFileSync("voucher.json", JSON.stringify({ signedAt: new Date().toISOString(), v }, null, 2));
   console.log("signed by", signer);

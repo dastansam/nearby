@@ -28,8 +28,8 @@ void main() {
   });
 
   test('re-spelling the nonce in base64 does not make it a new payment', () async {
-    // Dart decodes both base64 alphabets, so "/" and "_" spell the same nonce bytes and the
-    // signature stays valid. Keyed by the string, the same voucher would be accepted twice.
+    // Dart decodes both base64 alphabets, so "/" and "_" spell the same nonce bytes. The payee's
+    // checks refuse the second spelling; the store must not depend on that.
     final key = await Ed25519().newKeyPair();
     final v = await signVoucher(key, [Transfer('merchant.near', {usdcToken: '2500000'})],
         DateTime.now().add(const Duration(hours: 1)), Uint8List(32)..fillRange(0, 32, 0xff));
@@ -38,7 +38,6 @@ void main() {
       'payload': {...v['payload'] as Map<String, dynamic>, 'nonce': (v['payload']['nonce'] as String).replaceAll('/', '_')},
     };
     expect(respelled['payload']['nonce'], isNot(v['payload']['nonce']));
-    expect(await verifyVoucher(respelled), isNull, reason: 'the re-spelled voucher still verifies');
 
     expect(await store.add(v, sent: false), isTrue);
     expect(await store.add(respelled, sent: false), isFalse);

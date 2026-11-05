@@ -114,6 +114,39 @@ void main() {
       expect(await reasonFor(qr), 'malformed');
     });
 
+    test('refuses a correctly signed voucher carrying a field the contract hashes', () async {
+      // intents.near includes payload.callback_url in the signed hash; we hash without it. So the
+      // signature checks out here and fails on chain.
+      final v = jsonDecode(await voucherQr()) as Map<String, dynamic>;
+      (v['payload'] as Map<String, dynamic>)['callback_url'] = 'x';
+      expect(await reasonFor(jsonEncode(v)), 'malformed');
+    });
+
+    test('refuses a key tag that is not a prefix', () async {
+      final v = jsonDecode(await voucherQr()) as Map<String, dynamic>;
+      v['public_key'] = '${(v['public_key'] as String).substring(8)}ed25519:';
+      expect(await reasonFor(jsonEncode(v)), 'malformed');
+    });
+
+    test('refuses date spellings only Dart would parse', () async {
+      for (final deadline in ['20261112T100000Z', '2026-11-12T10Z', '2026-11-12T10:00:00.000+0000']) {
+        expect(await reasonFor(await handSignedQr({'deadline': deadline, 'intents': [transfer]})), 'deadline',
+            reason: deadline);
+      }
+    });
+
+    test('refuses a message with a duplicated key', () async {
+      // Dart keeps the last "intents"; the contract's parser rejects the duplicate.
+      final good = jsonDecode(await handSignedQr({'deadline': '2026-11-12T10:00:00.000Z', 'intents': [transfer]}));
+      final message = (good['payload']['message'] as String).replaceFirst('"intents":', '"intents":[],"intents":');
+      final sig = await Ed25519().sign(
+          nep413Hash(message, base64.decode(good['payload']['nonce']), verifyingContract),
+          keyPair: payer);
+      good['payload']['message'] = message;
+      good['signature'] = 'ed25519:${base58.encode(Uint8List.fromList(sig.bytes))}';
+      expect(await reasonFor(jsonEncode(good)), 'mismatch');
+    });
+
     test('refuses a memo that is not text', () async {
       final qr = await handSignedQr({
         'deadline': '2026-11-12T10:00:00.000Z',
@@ -174,6 +207,7 @@ void main() {
       expect(parseUsdc('2.5'), '2500000');
       expect(parseUsdc('0.000001'), '1');
       expect(parseUsdc('25'), '25000000');
+      expect(parseUsdc('2,5'), '2500000', reason: 'comma-decimal keypads');
     });
 
     test('rejects amounts that are not payable', () {

@@ -10,13 +10,17 @@ const usdcToken = 'nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad20
 const _usdcDecimals = 6;
 const _voucherLifetime = Duration(hours: 72);
 
+/// Memo characters every JSON encoder writes the same way, so the rebuilt message can match.
+final _plainAscii = RegExp(r'^[\x20-\x7e]*$');
+
 /// A voucher must still be valid this long after the payee accepts it: it settles only once
 /// some phone carries it to the internet, and the payee's clock may be off.
 const minTimeToSettle = Duration(hours: 24);
 
 /// "2.5" -> "2500000". Null if not a positive amount with at most 6 decimals.
 String? parseUsdc(String input) {
-  final m = RegExp(r'^(\d+)(?:\.(\d{1,6}))?$').firstMatch(input.trim());
+  // Many locales' decimal keypads offer only a comma.
+  final m = RegExp(r'^(\d+)(?:\.(\d{1,6}))?$').firstMatch(input.trim().replaceAll(',', '.'));
   if (m == null) return null;
   final units = BigInt.parse(m[1]! + (m[2] ?? '').padRight(_usdcDecimals, '0'));
   return units > BigInt.zero ? units.toString() : null;
@@ -75,21 +79,18 @@ Future<({Map<String, dynamic>? voucher, String? reason})> checkPayment(String qr
     final v = jsonDecode(qr) as Map<String, dynamic>;
     final reason = await verifyVoucher(v, now: (now ?? DateTime.now()).add(minTimeToSettle));
     if (reason != null) return (voucher: null, reason: reason);
-    // The contract takes standard base64 only; Dart would also decode the URL-safe alphabet.
-    final nonce = v['payload']['nonce'] as String;
-    if (base64.encode(base64.decode(nonce)) != nonce) return (voucher: null, reason: 'malformed');
-    final intents = jsonDecode(v['payload']['message'])['intents'] as List;
-    if (intents.length != 1) return (voucher: null, reason: 'mismatch');
-    final t = intents[0] as Map;
-    final tokens = t['tokens'] as Map;
-    // Exactly one transfer, to us, of exactly this token and amount, and nothing we don't understand.
-    final matches = t['intent'] == 'transfer' &&
-        t['receiver_id'] == request.receiverId &&
-        tokens.length == 1 &&
-        tokens[request.token] == request.amount &&
-        (t['memo'] == null || t['memo'] is String) &&
-        t.keys.every(const {'intent', 'receiver_id', 'tokens', 'memo'}.contains);
-    return matches ? (voucher: v, reason: null) : (voucher: null, reason: 'mismatch');
+    // One transfer, to us, of exactly this token and amount, and nothing else: rebuild the
+    // message we would sign for this request and require the payer's to be identical. Only the
+    // deadline and the memo are the payer's to choose.
+    final message = v['payload']['message'] as String;
+    final msg = jsonDecode(message);
+    final memo = msg['intents'][0]['memo'];
+    final memoOk = memo == null || (memo is String && _plainAscii.hasMatch(memo));
+    final expected = !memoOk
+        ? null
+        : intentMessage(msg['signer_id'], [Transfer(request.receiverId, {request.token: request.amount}, memo: memo)],
+            DateTime.parse(msg['deadline']));
+    return message == expected ? (voucher: v, reason: null) : (voucher: null, reason: 'mismatch');
   } catch (_) {
     return (voucher: null, reason: 'malformed');
   }

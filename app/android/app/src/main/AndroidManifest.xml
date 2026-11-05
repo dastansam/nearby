@@ -1,7 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- No backup: a restored keystore blob cannot be decrypted on another install. -->
+    <!-- No backup or device transfer: a copied keystore blob cannot be decrypted on another install. -->
     <application
         android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:label="NearBy"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">

@@ -54,9 +54,12 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _flow(Future<void> Function() run) async {
     if (_busy) return;
     _busy = true;
+    final messenger = ScaffoldMessenger.of(context);
     try {
       await run();
       await _reloadVouchers();
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Something went wrong, check the list before retrying: $e')));
     } finally {
       _busy = false;
     }
