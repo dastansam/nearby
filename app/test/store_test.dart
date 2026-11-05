@@ -46,6 +46,9 @@ void main() {
 
   test('lists what was stored, with the amount to show', () async {
     await store.add(voucher, sent: true);
-    expect(await store.all(), contains((sent: true, amount: '2500000')));
+    final stored = (await store.all()).firstWhere((s) => s.voucher['signature'] == voucher['signature']);
+    expect((stored.sent, stored.amount), (true, '2500000'));
+    // The payer re-shows this exact voucher instead of signing a second one for the same purchase.
+    expect(stored.voucher, voucher);
   });
 }

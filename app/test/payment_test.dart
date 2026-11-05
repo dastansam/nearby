@@ -1,5 +1,7 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
+import 'package:bs58/bs58.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nearby/voucher/nep413.dart';
@@ -17,18 +19,38 @@ void main() {
     Map<String, String> tokens = const {usdcToken: '2500000'},
     List<Transfer>? intents,
     DateTime? deadline,
+    Uint8List? nonce,
   }) async =>
       jsonEncode(await signVoucher(payer, intents ?? [Transfer(receiver, tokens, memo: 'seq:1 prev:00')],
-          deadline ?? now.add(const Duration(hours: 72)), makeNonce('252812b3')));
+          deadline ?? now.add(const Duration(hours: 72)), nonce ?? makeNonce('252812b3')));
 
-  Future<String?> reasonFor(String qr) async => (await checkPayment(qr, request, now: now)).reason;
+  /// Signs an arbitrary message the way a hostile payer app could, bypassing signVoucher.
+  Future<String> handSignedQr(Map<String, dynamic> message, {String? nonceBase64}) async {
+    final v = jsonDecode(await voucherQr()) as Map<String, dynamic>;
+    final text = jsonEncode({'signer_id': implicitAccount((await payer.extractPublicKey()).bytes), ...message});
+    final nonce = nonceBase64 ?? v['payload']['nonce'] as String;
+    final sig = await Ed25519().sign(nep413Hash(text, base64.decode(nonce), verifyingContract), keyPair: payer);
+    return jsonEncode({
+      ...v,
+      'payload': {'message': text, 'nonce': nonce, 'recipient': verifyingContract},
+      'signature': 'ed25519:${base58.encode(Uint8List.fromList(sig.bytes))}',
+    });
+  }
+
+  const transfer = {
+    'intent': 'transfer',
+    'receiver_id': 'merchant.near',
+    'tokens': {usdcToken: '2500000'},
+  };
+
+  Future<String?> reasonFor(String qr) async => (await checkPayment(qr, request, '252812b3', now: now)).reason;
 
   // The payee hands over goods on the strength of these checks alone: there is no network
   // to ask. Each refusal below is a way the voucher would fail to pay this payee in full.
   // (Refusing a voucher shown twice is the store's job: see store_test.dart.)
   group('payee accepts a voucher only if it will pay them', () {
     test('accepts what the payer app signs for the request', () async {
-      final check = await checkPayment(jsonEncode(await signPayment(payer, request, '252812b3')), request);
+      final check = await checkPayment(jsonEncode(await signPayment(payer, request, '252812b3')), request, '252812b3');
       expect(check.reason, isNull);
       expect(amountOf(check.voucher!), '2500000');
     });
@@ -64,6 +86,47 @@ void main() {
       expect(await reasonFor(await voucherQr(deadline: now.subtract(const Duration(seconds: 1)))), 'expired');
     });
 
+    test('refuses a voucher that would expire before it can reach the chain', () async {
+      // Settlement waits for some phone to find a signal. A voucher valid for one more minute
+      // passes every signature check and is worthless by the time a gateway submits it.
+      expect(await reasonFor(await voucherQr(deadline: now.add(const Duration(minutes: 1)))), 'expired');
+      expect(await reasonFor(await voucherQr(deadline: now.add(minTimeToSettle + const Duration(minutes: 1)))), isNull);
+    });
+
+    test('refuses a nonce without the salt the payee knows', () async {
+      // intents.near rejects a nonce whose salt is not in its registry, so this never settles.
+      expect(await reasonFor(await voucherQr(nonce: makeNonce('00000000'))), 'salt');
+    });
+
+    // Dart's parsers accept more than the contract's. Each of these is correctly signed and
+    // would read fine here, but intents.near could not deserialize it, so it would never pay.
+    test('refuses a deadline without a time zone', () async {
+      final qr = await handSignedQr({'deadline': '2026-11-12T10:00:00', 'intents': [transfer]});
+      expect(await reasonFor(qr), 'deadline');
+    });
+
+    test('refuses a nonce in URL-safe base64', () async {
+      final nonce = base64Url.encode(Uint8List.fromList([0x25, 0x28, 0x12, 0xb3, ...List.filled(28, 0xff)]));
+      expect(nonce, contains('_'));
+      final qr = await handSignedQr({'deadline': '2026-11-12T10:00:00.000Z', 'intents': [transfer]}, nonceBase64: nonce);
+      expect(await reasonFor(qr), 'malformed');
+    });
+
+    test('refuses a memo that is not text', () async {
+      final qr = await handSignedQr({
+        'deadline': '2026-11-12T10:00:00.000Z',
+        'intents': [
+          {...transfer, 'memo': 17}
+        ],
+      });
+      expect(await reasonFor(qr), 'mismatch');
+    });
+
+    test('accepts a hand-signed voucher that is well formed', () async {
+      // Guards the three refusals above against passing for the wrong reason.
+      expect(await reasonFor(await handSignedQr({'deadline': '2026-11-12T10:00:00.000Z', 'intents': [transfer]})), isNull);
+    });
+
     test('refuses a voucher altered after signing', () async {
       final qr = (await voucherQr(tokens: {usdcToken: '25'})).replaceFirst(r'\"25\"', r'\"2500000\"');
       expect(await reasonFor(qr), 'signature');
@@ -88,6 +151,13 @@ void main() {
       expect(PaymentRequest.decode('hello'), isNull);
       expect(PaymentRequest.decode(requestQr(amount: '0')), isNull);
       expect(PaymentRequest.decode(requestQr(amount: '-5')), isNull);
+    });
+
+    test('is refused when the amount is not a plain decimal the contract can parse', () {
+      // BigInt.parse would take these, and the payer would sign a voucher that cannot settle.
+      for (final bad in ['0x2625a0', '+5', ' 5', '05', '2.5']) {
+        expect(PaymentRequest.decode(requestQr(amount: bad)), isNull, reason: bad);
+      }
     });
 
     test('is refused for a token the app cannot show honestly', () {

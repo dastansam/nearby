@@ -82,6 +82,9 @@ Future<String?> verifyVoucher(Map<String, dynamic> v, {DateTime? now}) async {
   if (!ok) return 'signature';
   final msg = jsonDecode(p['message']) as Map<String, dynamic>;
   if (msg['signer_id'] != implicitAccount(pub)) return 'signer_id';
-  if (!DateTime.parse(msg['deadline']).isAfter(now ?? DateTime.now())) return 'expired';
+  final deadline = DateTime.parse(msg['deadline']);
+  // Without a zone Dart reads local time, but the contract's RFC 3339 parser rejects it outright.
+  if (!deadline.isUtc) return 'deadline';
+  if (!deadline.isAfter(now ?? DateTime.now())) return 'expired';
   return null;
 }

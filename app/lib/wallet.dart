@@ -9,7 +9,9 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'voucher/nep413.dart';
 
 const _rpc = 'https://rpc.mainnet.near.org';
-const _storage = FlutterSecureStorage();
+// resetOnError defaults to true, which wipes the keystore on a decrypt error; load() would then
+// see no seed and mint a new key, orphaning the funded account. Fail instead.
+const _storage = FlutterSecureStorage(aOptions: AndroidOptions(resetOnError: false));
 
 class Wallet {
   final SimpleKeyPair key;

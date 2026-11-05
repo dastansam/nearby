@@ -30,6 +30,8 @@ class _HomeScreenState extends State<HomeScreen> {
   Wallet? _wallet;
   late VoucherStore _store;
   List<StoredVoucher> _vouchers = [];
+  Object? _loadError;
+  bool _busy = false; // a Pay or Receive flow is open; a second tap must not start another
 
   @override
   void initState() {
@@ -38,10 +40,26 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _load() async {
-    final (wallet, store) = await (Wallet.load(), VoucherStore.open()).wait;
-    _store = store;
-    await _reloadVouchers();
-    if (mounted) setState(() => _wallet = wallet);
+    try {
+      final wallet = await Wallet.load();
+      _store = await VoucherStore.open();
+      await _reloadVouchers();
+      if (mounted) setState(() => _wallet = wallet);
+    } catch (e) {
+      // Never fall through to a fresh wallet: the stored key may hold the user's money.
+      if (mounted) setState(() => _loadError = e);
+    }
+  }
+
+  Future<void> _flow(Future<void> Function() run) async {
+    if (_busy) return;
+    _busy = true;
+    try {
+      await run();
+      await _reloadVouchers();
+    } finally {
+      _busy = false;
+    }
   }
 
   Future<void> _reloadVouchers() async {
@@ -62,7 +80,19 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final wallet = _wallet;
-    if (wallet == null) return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    if (wallet == null) {
+      return Scaffold(
+        body: Center(
+          child: _loadError == null
+              ? const CircularProgressIndicator()
+              : Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Text('Could not open the wallet. Your key was not changed.\n\n$_loadError'),
+                ),
+        ),
+      );
+    }
+    final salt = wallet.salt;
     return Scaffold(
       appBar: AppBar(title: const Text('NearBy')),
       body: Column(children: [
@@ -71,8 +101,8 @@ class _HomeScreenState extends State<HomeScreen> {
           subtitle: SelectableText(wallet.accountId),
         ),
         ListTile(
-          title: Text(wallet.salt == null ? 'Not ready to pay offline' : 'Ready to pay offline'),
-          subtitle: Text(wallet.salt == null ? 'Go online and tap refresh' : 'Salt ${wallet.salt}'),
+          title: Text(salt == null ? 'Not ready for offline payments' : 'Ready for offline payments'),
+          subtitle: Text(salt == null ? 'Go online and tap refresh' : 'Salt $salt'),
           trailing: IconButton(icon: const Icon(Icons.refresh), onPressed: _refreshSalt),
         ),
         Padding(
@@ -80,22 +110,24 @@ class _HomeScreenState extends State<HomeScreen> {
           child: Row(children: [
             Expanded(
               child: FilledButton(
-                onPressed: () async {
-                  await pay(context, wallet, _store);
-                  await _reloadVouchers();
-                },
+                onPressed: () => _flow(() => pay(context, wallet, _store)),
                 child: const Text('Pay'),
               ),
             ),
             const SizedBox(width: 16),
             Expanded(
               child: FilledButton.tonal(
-                onPressed: () async {
-                  await Navigator.push(
+                onPressed: () {
+                  // The payee checks each voucher's nonce against its own cached salt.
+                  if (salt == null) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Go online once and tap refresh before receiving offline')));
+                    return;
+                  }
+                  _flow(() => Navigator.push(
                       context,
                       MaterialPageRoute(
-                          builder: (_) => ReceiveScreen(accountId: wallet.accountId, store: _store)));
-                  await _reloadVouchers();
+                          builder: (_) => ReceiveScreen(accountId: wallet.accountId, salt: salt, store: _store))));
                 },
                 child: const Text('Receive'),
               ),
@@ -110,7 +142,12 @@ class _HomeScreenState extends State<HomeScreen> {
               return ListTile(
                 leading: Icon(v.sent ? Icons.arrow_upward : Icons.arrow_downward),
                 title: Text('${v.sent ? 'Sent' : 'Received'} ${formatUsdc(v.amount)}'),
-                subtitle: const Text('Pending settlement'),
+                subtitle: Text(v.sent ? 'Pending settlement · tap to show the QR again' : 'Pending settlement'),
+                // Re-showing beats re-signing: a second voucher for one purchase would settle twice.
+                onTap: v.sent
+                    ? () => Navigator.push(
+                        context, MaterialPageRoute(builder: (_) => VoucherScreen(voucher: v.voucher)))
+                    : null,
               );
             },
           ),

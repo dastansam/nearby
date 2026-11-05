@@ -8,8 +8,9 @@ import 'scan.dart';
 /// Payee side: ask for an amount, show the request QR, then scan and check the payer's voucher.
 class ReceiveScreen extends StatefulWidget {
   final String accountId;
+  final String salt;
   final VoucherStore store;
-  const ReceiveScreen({super.key, required this.accountId, required this.store});
+  const ReceiveScreen({super.key, required this.accountId, required this.salt, required this.store});
 
   @override
   State<ReceiveScreen> createState() => _ReceiveScreenState();
@@ -20,6 +21,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
   PaymentRequest? _request;
   bool _paid = false;
   String? _rejection; // why the last scanned voucher was refused
+  bool _scanning = false; // a second tap must not stack a second scanner
 
   @override
   void dispose() {
@@ -37,16 +39,22 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
   }
 
   Future<void> _scanVoucher() async {
-    final qr = await scanQr(context, 'Scan the voucher');
-    if (qr == null) return;
-    final check = await checkPayment(qr, _request!);
-    var rejection = check.reason;
-    if (check.voucher != null && !await widget.store.add(check.voucher!, sent: false)) rejection = 'replay';
-    if (!mounted) return;
-    setState(() {
-      _paid = rejection == null;
-      _rejection = rejection;
-    });
+    if (_scanning) return;
+    _scanning = true;
+    try {
+      final qr = await scanQr(context, 'Scan the voucher');
+      if (qr == null) return;
+      final check = await checkPayment(qr, _request!, widget.salt);
+      var rejection = check.reason;
+      if (check.voucher != null && !await widget.store.add(check.voucher!, sent: false)) rejection = 'replay';
+      if (!mounted) return;
+      setState(() {
+        _paid = rejection == null;
+        _rejection = rejection;
+      });
+    } finally {
+      _scanning = false;
+    }
   }
 
   @override

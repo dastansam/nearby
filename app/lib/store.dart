@@ -6,7 +6,7 @@ import 'package:sqflite/sqflite.dart';
 import 'voucher/nep413.dart';
 import 'voucher/payment.dart';
 
-typedef StoredVoucher = ({bool sent, String amount});
+typedef StoredVoucher = ({bool sent, String amount, Map<String, dynamic> voucher});
 
 class VoucherStore {
   final Database _db;
@@ -36,8 +36,12 @@ class VoucherStore {
   }
 
   /// Newest first.
-  Future<List<StoredVoucher>> all() async => [
-        for (final r in await _db.query('vouchers', orderBy: 'created_at DESC'))
-          (sent: r['sent'] == 1, amount: amountOf(jsonDecode(r['json'] as String)))
-      ];
+  Future<List<StoredVoucher>> all() async {
+    final rows = await _db.query('vouchers', orderBy: 'created_at DESC');
+    return [
+      for (final r in rows)
+        if (jsonDecode(r['json'] as String) case final Map<String, dynamic> v)
+          (sent: r['sent'] == 1, amount: amountOf(v), voucher: v)
+    ];
+  }
 }

@@ -10,6 +10,10 @@ const usdcToken = 'nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad20
 const _usdcDecimals = 6;
 const _voucherLifetime = Duration(hours: 72);
 
+/// A voucher must still be valid this long after the payee accepts it: it settles only once
+/// some phone carries it to the internet, and the payee's clock may be off.
+const minTimeToSettle = Duration(hours: 24);
+
 /// "2.5" -> "2500000". Null if not a positive amount with at most 6 decimals.
 String? parseUsdc(String input) {
   final m = RegExp(r'^(\d+)(?:\.(\d{1,6}))?$').firstMatch(input.trim());
@@ -42,7 +46,8 @@ class PaymentRequest {
     try {
       final j = jsonDecode(qr) as Map<String, dynamic>;
       final amount = j['amount'] as String;
-      if (j['token'] != usdcToken || BigInt.parse(amount) <= BigInt.zero) return null;
+      // Plain positive decimal only: the contract parses it as u128, and BigInt.parse takes "0x10" or "+5".
+      if (j['token'] != usdcToken || !RegExp(r'^[1-9]\d*$').hasMatch(amount)) return null;
       return PaymentRequest(receiverId: j['receiver_id'] as String, token: usdcToken, amount: amount);
     } catch (_) {
       return null;
@@ -57,18 +62,26 @@ Future<Map<String, dynamic>> signPayment(SimpleKeyPair key, PaymentRequest reque
     DateTime.now().add(_voucherLifetime),
     makeNonce(saltHex));
 
-/// The payee's offline checks on a scanned voucher. Returns the voucher if it is a valid,
-/// unexpired payment of exactly [request]; otherwise the reason it was refused.
+/// The payee's offline checks on a scanned voucher. Returns the voucher if it is a valid
+/// payment of exactly [request] that still has [minTimeToSettle] to run; otherwise the reason
+/// it was refused. [saltHex] is the payee's own cached intents.near salt.
 ///
 /// The voucher is the payee's only claim on the money, so anything that would make
 /// intents.near pay someone else, pay less, or reject it must be refused here. Whether this
 /// voucher was already accepted is the store's call (VoucherStore.add).
-Future<({Map<String, dynamic>? voucher, String? reason})> checkPayment(String qr, PaymentRequest request,
+Future<({Map<String, dynamic>? voucher, String? reason})> checkPayment(
+    String qr, PaymentRequest request, String saltHex,
     {DateTime? now}) async {
   try {
     final v = jsonDecode(qr) as Map<String, dynamic>;
-    final reason = await verifyVoucher(v, now: now);
+    final reason = await verifyVoucher(v, now: (now ?? DateTime.now()).add(minTimeToSettle));
     if (reason != null) return (voucher: null, reason: reason);
+    // The contract takes standard base64 only; Dart would also decode the URL-safe alphabet.
+    final nonce = v['payload']['nonce'] as String;
+    if (base64.encode(base64.decode(nonce)) != nonce) return (voucher: null, reason: 'malformed');
+    // A nonce without the contract's salt never settles. If the two phones cached different
+    // salts one of them is stale, and the payee is the one who loses by guessing.
+    if (!nonceId(v).startsWith(saltHex)) return (voucher: null, reason: 'salt');
     final intents = jsonDecode(v['payload']['message'])['intents'] as List;
     if (intents.length != 1) return (voucher: null, reason: 'mismatch');
     final t = intents[0] as Map;
@@ -78,6 +91,7 @@ Future<({Map<String, dynamic>? voucher, String? reason})> checkPayment(String qr
         t['receiver_id'] == request.receiverId &&
         tokens.length == 1 &&
         tokens[request.token] == request.amount &&
+        (t['memo'] == null || t['memo'] is String) &&
         t.keys.every(const {'intent', 'receiver_id', 'tokens', 'memo'}.contains);
     return matches ? (voucher: v, reason: null) : (voucher: null, reason: 'mismatch');
   } catch (_) {
