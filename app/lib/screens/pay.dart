@@ -32,7 +32,7 @@ Future<void> pay(BuildContext context, Wallet wallet, VoucherStore store) async 
   if (confirmed != true) return;
 
   final voucher = await signPayment(wallet.key, request);
-  await store.add(voucher, sent: true);
+  await store.put(voucher, VoucherKind.sent);
   if (!context.mounted) return;
   await Navigator.push(context, MaterialPageRoute(builder: (_) => VoucherScreen(voucher: voucher)));
 }
