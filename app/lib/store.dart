@@ -52,8 +52,9 @@ class VoucherStore {
   /// before they scan it. Storing that identical voucher as their own then succeeds.
   Future<bool> put(Map<String, dynamic> voucher, VoucherKind kind, {int hops = 0}) async {
     final key = voucherKey(voucher), json = jsonEncode(voucher);
-    final stored = await _db.transaction((txn) async {
-      final held = await txn.query('vouchers', columns: ['kind', 'json'], where: 'key = ?', whereArgs: [key]);
+    // The hop count the voucher is stored with, or null if it was not stored.
+    final storedHops = await _db.transaction<int?>((txn) async {
+      final held = await txn.query('vouchers', columns: ['kind', 'hops', 'json'], where: 'key = ?', whereArgs: [key]);
       if (held.isEmpty) {
         await txn.insert('vouchers', {
           'key': key,
@@ -62,16 +63,16 @@ class VoucherStore {
           'json': json,
           'created_at': DateTime.now().millisecondsSinceEpoch,
         });
-        return true;
+        return hops;
       }
       final claim = held.single['kind'] == VoucherKind.relayed.name &&
           kind != VoucherKind.relayed &&
           held.single['json'] == json;
       if (claim) await txn.update('vouchers', {'kind': kind.name}, where: 'key = ?', whereArgs: [key]);
-      return claim;
+      return claim ? held.single['hops'] as int : null;
     });
-    if (stored) _puts.add((kind: kind, hops: hops, voucher: voucher));
-    return stored;
+    if (storedHops != null) _puts.add((kind: kind, hops: storedHops, voucher: voucher));
+    return storedHops != null;
   }
 
   Future<Set<String>> keys() async => {for (final r in await _db.query('vouchers', columns: ['key'])) r['key'] as String};

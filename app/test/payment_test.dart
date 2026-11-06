@@ -63,16 +63,11 @@ void main() {
       expect(await reasonFor(await voucherQr()), isNull);
     });
 
-    // Vouchers also arrive over the mesh, with nobody holding up a phone. Two customers paying
-    // 2.50 would be indistinguishable, and the merchant would hand the goods to whoever is at the counter.
-    test('refuses a voucher signed for a different request of the same amount', () async {
-      expect(await reasonFor(await voucherQr(memo: 'req:0000000000000000')), 'mismatch');
-      expect(await reasonFor(await voucherQr(memo: null)), 'mismatch');
-    });
-
-    test('refuses a memo that only looks like it names the request', () async {
-      expect(await reasonFor(await voucherQr(memo: 'x${request.memoTag}')), 'mismatch');
-      expect(await reasonFor(await voucherQr(memo: '${request.memoTag}1')), 'mismatch');
+    test('accepts a scanned voucher signed for an earlier request of the same amount', () async {
+      // A payee who backed out and typed the amount again shows a new request id. The payer has
+      // already signed, and that voucher will settle: refusing it would make them pay twice.
+      expect(await reasonFor(await voucherQr(memo: 'req:0000000000000000')), isNull);
+      expect(await reasonFor(await voucherQr(memo: null)), isNull);
     });
 
     test('refuses a voucher that pays someone else', () async {
@@ -185,6 +180,32 @@ void main() {
     test('refuses a QR that is not a voucher', () async {
       expect(await reasonFor('https://example.com'), 'malformed');
       expect(await reasonFor(request.encode()), 'standard');
+    });
+  });
+
+  // Vouchers also arrive by radio, with nobody holding up a phone. Two customers paying 2.50
+  // are then indistinguishable, and "Paid" would appear for whoever happens to be at the counter.
+  group('a voucher arriving by radio counts for a request only if signed for it', () {
+    Future<bool> names(String? memo) async => namesRequest(jsonDecode(await voucherQr(memo: memo)), request);
+
+    test('counts when the payer app signed it for this request', () async {
+      expect(namesRequest(await signPayment(payer, request), request), isTrue);
+      expect(await names('${request.memoTag} seq:1 prev:00'), isTrue);
+    });
+
+    test('does not count for another request of the same amount, or for none', () async {
+      expect(await names('req:0000000000000000'), isFalse);
+      expect(await names(null), isFalse);
+    });
+
+    test('does not count when the memo only looks like it names the request', () async {
+      expect(await names('x${request.memoTag}'), isFalse);
+      expect(await names('${request.memoTag}1'), isFalse);
+    });
+
+    test('does not count when it names two requests', () async {
+      // Two tills on one merchant account would both show "Paid" for a single payment.
+      expect(await names('${request.memoTag} req:0000000000000000'), isFalse);
     });
   });
 

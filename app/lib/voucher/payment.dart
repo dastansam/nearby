@@ -45,9 +45,8 @@ class PaymentRequest {
   final String token;
   final String amount; // token base units
 
-  /// Random per request ([newRequestId]). The payer signs it into the voucher's memo, which ties
-  /// the voucher to this request: two customers paying the same amount are otherwise identical,
-  /// and a voucher arriving over the mesh would mark the wrong customer as paid.
+  /// Random per request ([newRequestId]). The payer signs it into the voucher's memo, so a voucher
+  /// that arrives over the mesh can be matched to the request on screen: see [namesRequest].
   final String id;
 
   const PaymentRequest({required this.receiverId, required this.token, required this.amount, required this.id});
@@ -95,11 +94,12 @@ Future<({Map<String, dynamic>? voucher, String? reason})> checkPayment(String qr
     if (reason != null) return (voucher: null, reason: reason);
     // One transfer, to us, of exactly this token and amount, and nothing else: rebuild the
     // message we would sign for this request and require the payer's to be identical. Only the
-    // deadline and the rest of the memo are the payer's to choose; the memo must name this request.
+    // deadline and the memo are the payer's to choose. Which request the memo names is not checked
+    // here: a payee who re-enters the amount must still be able to take the voucher already signed.
     final message = v['payload']['message'] as String;
     final msg = jsonDecode(message);
     final memo = msg['intents'][0]['memo'];
-    final memoOk = memo is String && _plainAscii.hasMatch(memo) && memo.split(' ').contains(request.memoTag);
+    final memoOk = memo == null || (memo is String && _plainAscii.hasMatch(memo));
     final expected = !memoOk
         ? null
         : intentMessage(msg['signer_id'], [Transfer(request.receiverId, {request.token: request.amount}, memo: memo)],
@@ -107,6 +107,19 @@ Future<({Map<String, dynamic>? voucher, String? reason})> checkPayment(String qr
     return message == expected ? (voucher: v, reason: null) : (voucher: null, reason: 'mismatch');
   } catch (_) {
     return (voucher: null, reason: 'malformed');
+  }
+}
+
+/// Whether [v] was signed for [request] and no other, going by its memo. This is what lets a
+/// voucher that arrives by radio mark a request as paid: nobody is holding up a phone, and two
+/// customers paying the same amount are otherwise indistinguishable. A voucher naming two
+/// requests counts for neither, or one payment could satisfy two tills.
+bool namesRequest(Map<String, dynamic> v, PaymentRequest request) {
+  try {
+    final memo = jsonDecode(v['payload']['message'])['intents'][0]['memo'];
+    return memo is String && memo.split(' ').where((e) => e.startsWith('req:')).join(' ') == request.memoTag;
+  } catch (_) {
+    return false;
   }
 }
 

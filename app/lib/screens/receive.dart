@@ -38,18 +38,25 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
   void initState() {
     super.initState();
     // The payer's phone usually delivers the voucher over the mesh before anyone scans it. Other
-    // people's payments arrive the same way, so one that is not for this request is not a rejection.
+    // people's payments arrive the same way; only one signed for this request is ours to judge.
     _mesh = widget.store.puts.listen((p) async {
       final request = _request;
-      if (request == null || _paid || p.kind != VoucherKind.relayed) return;
-      // Nearly everything the mesh brings is someone else's; skip those before the signature check.
-      if (!(p.voucher['payload']['message'] as String).contains(request.memoTag)) return;
-      if (await acceptPayment(widget.store, request, jsonEncode(p.voucher)) != null || !mounted) return;
-      setState(() {
-        _paid = true;
-        _rejection = null;
-      });
+      if (request == null || p.kind != VoucherKind.relayed || !namesRequest(p.voucher, request)) return;
+      _show(await acceptPayment(widget.store, request, jsonEncode(p.voucher)));
     });
+  }
+
+  /// Shows the outcome of checking a voucher. Once paid, the screen stays paid: a second
+  /// voucher for the request, or the same one scanned after it came by radio, changes nothing.
+  void _show(String? rejection) {
+    if (!mounted || _paid) return;
+    setState(() {
+      _paid = rejection == null;
+      _rejection = rejection;
+    });
+    // The payment can arrive by radio while the scanner is open on top of this screen.
+    final route = ModalRoute.of(context);
+    if (_paid && route != null) Navigator.of(context).popUntil((r) => r == route);
   }
 
   @override
@@ -75,13 +82,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     try {
       final qr = await scanQr(context, 'Scan the voucher');
       if (qr == null) return;
-      final rejection = await acceptPayment(widget.store, _request!, qr);
-      // If the same voucher came in over the mesh meanwhile, it is paid, not a replay.
-      if (!mounted || _paid) return;
-      setState(() {
-        _paid = rejection == null;
-        _rejection = rejection;
-      });
+      _show(await acceptPayment(widget.store, _request!, qr));
     } finally {
       _scanning = false;
     }
@@ -112,7 +113,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                 if (_paid)
                   Icon(Icons.check_circle, size: 160, color: theme.colorScheme.primary)
                 else
-                  QrImageView(data: request.encode(), size: 260, backgroundColor: Colors.white),
+                  QrImageView(key: ValueKey(request.encode()), data: request.encode(), size: 260, backgroundColor: Colors.white),
                 const SizedBox(height: 16),
                 if (_paid)
                   Text('Paid, pending settlement', style: theme.textTheme.titleLarge)

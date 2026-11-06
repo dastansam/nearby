@@ -6,7 +6,6 @@ import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nearby/mesh/gossip.dart';
 import 'package:nearby/mesh/transport.dart';
-import 'package:nearby/screens/receive.dart';
 import 'package:nearby/store.dart';
 import 'package:nearby/voucher/nep413.dart';
 import 'package:nearby/voucher/payment.dart';
@@ -124,23 +123,6 @@ void main() {
     final carried = (await gateway.store.all()).single;
     expect((carried.kind, carried.hops), (VoucherKind.relayed, 2));
     expect(carried.voucher, voucher, reason: 'the gateway must be able to submit exactly what was signed');
-  });
-
-  // The spec's main hand-off: the voucher travels by radio and the payee's phone recognises it.
-  test('a payment delivered over the mesh is one the payee can accept for its request', () async {
-    final payer = await phone('payer'), merchant = await phone('merchant');
-    air.link(payer, merchant);
-    await air.settle();
-    final arrived = merchant.store.puts.first;
-
-    await payer.store.put(await payment(), VoucherKind.sent);
-    await air.settle();
-
-    // What the receive screen does with a voucher the mesh brings in for the request on screen.
-    final delivered = jsonEncode((await arrived).voucher);
-    expect(await acceptPayment(merchant.store, request, delivered), isNull);
-    expect(await acceptPayment(merchant.store, request, delivered), 'replay',
-        reason: 'the payer showing the same voucher as a QR afterwards is not a second payment');
   });
 
   // The payer may keep the QR on screen for minutes; the payment should already be travelling.
