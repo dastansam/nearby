@@ -72,7 +72,7 @@ Future<Map<String, dynamic>> signPayment(SimpleKeyPair key, PaymentRequest reque
 ///
 /// The voucher is the payee's only claim on the money, so anything that would make
 /// intents.near pay someone else, pay less, or reject it must be refused here. Whether this
-/// voucher was already accepted is the store's call (VoucherStore.add).
+/// voucher was already accepted is the store's call (VoucherStore.put).
 Future<({Map<String, dynamic>? voucher, String? reason})> checkPayment(String qr, PaymentRequest request,
     {DateTime? now}) async {
   try {

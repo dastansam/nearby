@@ -1,5 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
+import 'mesh/gossip.dart';
+import 'mesh/nearby_transport.dart';
 import 'screens/pay.dart';
 import 'screens/receive.dart';
 import 'store.dart';
@@ -31,12 +35,25 @@ class _HomeScreenState extends State<HomeScreen> {
   late VoucherStore _store;
   List<StoredVoucher> _vouchers = [];
   Object? _loadError;
+  Gossip? _gossip;
+  StreamSubscription<void>? _puts;
+  Timer? _reload;
+  int _carried = 0;
+  Object? _meshError;
   bool _busy = false; // a Pay or Receive flow is open; a second tap must not start another
 
   @override
   void initState() {
     super.initState();
     _load();
+  }
+
+  @override
+  void dispose() {
+    _gossip?.stop();
+    _puts?.cancel();
+    _reload?.cancel();
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -48,6 +65,24 @@ class _HomeScreenState extends State<HomeScreen> {
     } catch (e) {
       // Never fall through to a fresh wallet: the stored key may hold the user's money.
       if (mounted) setState(() => _loadError = e);
+      return;
+    }
+    // Paying and receiving by QR work without the mesh, so a mesh failure is shown, not fatal.
+    // A phone met after a while hands over its vouchers in a burst; one reload covers the burst.
+    _puts = _store.puts.listen((_) => _reload ??= Timer(const Duration(milliseconds: 300), () {
+          _reload = null;
+          _reloadVouchers();
+        }));
+    final gossip = Gossip(NearbyTransport(), _store, onChange: () {
+      if (mounted) setState(() {});
+    });
+    try {
+      await gossip.start();
+      if (mounted) setState(() => _gossip = gossip);
+    } catch (e) {
+      // Starting can fail halfway (advertising up, discovery refused); do not leave half a mesh running unseen.
+      await gossip.stop().catchError((_) {});
+      if (mounted) setState(() => _meshError = e);
     }
   }
 
@@ -66,8 +101,13 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _reloadVouchers() async {
-    final vouchers = await _store.all();
-    if (mounted) setState(() => _vouchers = vouchers);
+    final all = await _store.all();
+    if (!mounted) return;
+    // Only this phone's own payments are listed; carried ones would bury them, so they are just counted.
+    setState(() {
+      _vouchers = all.where((v) => v.kind != VoucherKind.relayed).toList();
+      _carried = all.length - _vouchers.length;
+    });
   }
 
   @override
@@ -91,6 +131,13 @@ class _HomeScreenState extends State<HomeScreen> {
         ListTile(
           title: const Text('Offline account'),
           subtitle: SelectableText(wallet.accountId),
+        ),
+        ListTile(
+          leading: const Icon(Icons.hub_outlined),
+          title: Text(_gossip == null ? 'Mesh off' : '${_gossip!.peerCount} phones connected'),
+          subtitle: Text(_gossip == null
+              ? (_meshError == null ? 'Starting' : 'QR payments still work. $_meshError')
+              : 'Carrying $_carried payments toward the internet'),
         ),
         Padding(
           padding: const EdgeInsets.all(16),
@@ -116,12 +163,13 @@ class _HomeScreenState extends State<HomeScreen> {
             itemCount: _vouchers.length,
             itemBuilder: (context, i) {
               final v = _vouchers[i];
+              final sent = v.kind == VoucherKind.sent;
               return ListTile(
-                leading: Icon(v.sent ? Icons.arrow_upward : Icons.arrow_downward),
-                title: Text('${v.sent ? 'Sent' : 'Received'} ${formatUsdc(v.amount)}'),
-                subtitle: Text(v.sent ? 'Pending settlement · tap to show the QR again' : 'Pending settlement'),
+                leading: Icon(sent ? Icons.arrow_upward : Icons.arrow_downward),
+                title: Text('${sent ? 'Sent' : 'Received'} ${formatUsdc(amountOf(v.voucher))}'),
+                subtitle: Text(sent ? 'Pending settlement · tap to show the QR again' : 'Pending settlement'),
                 // Re-showing beats re-signing: a second voucher for one purchase would settle twice.
-                onTap: v.sent
+                onTap: sent
                     ? () => Navigator.push(
                         context, MaterialPageRoute(builder: (_) => VoucherScreen(voucher: v.voucher)))
                     : null,

@@ -45,7 +45,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       if (qr == null) return;
       final check = await checkPayment(qr, _request!);
       var rejection = check.reason;
-      if (check.voucher != null && !await widget.store.add(check.voucher!, sent: false)) rejection = 'replay';
+      if (check.voucher != null && !await widget.store.put(check.voucher!, VoucherKind.received)) rejection = 'replay';
       if (!mounted) return;
       setState(() {
         _paid = rejection == null;

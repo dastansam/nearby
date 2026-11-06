@@ -44,8 +44,17 @@ Uint8List nep413Hash(String message, Uint8List nonce, String recipient) {
 String implicitAccount(List<int> pub) => hex.encode(pub);
 
 /// Canonical id of a voucher's nonce: hex of its bytes, not the base64 string, which has
-/// more than one spelling for the same bytes ("/" and "_" decode alike). The storage key.
+/// more than one spelling for the same bytes ("/" and "_" decode alike).
 String nonceId(Map<String, dynamic> v) => hex.encode(base64.decode(v['payload']['nonce']));
+
+/// Identifies a voucher the way the chain does: it settles one voucher per signer and nonce.
+/// Only the signer can produce a voucher under their key, so nobody else can occupy it.
+String voucherKey(Map<String, dynamic> v) => '${implicitAccount(_untag(v['public_key']))}:${nonceId(v)}';
+
+/// Bytes of an "ed25519:<base58>" key or signature.
+Uint8List _untag(String tagged) => base58.decode(tagged.replaceFirst('ed25519:', ''));
+
+DateTime voucherDeadline(Map<String, dynamic> v) => DateTime.parse(jsonDecode(v['payload']['message'])['deadline']);
 
 class Transfer {
   final String receiverId;
@@ -92,8 +101,7 @@ Future<String?> verifyVoucher(Map<String, dynamic> v, {DateTime? now}) async {
   if (v['standard'] != 'nep413') return 'standard';
   final p = v['payload'] as Map<String, dynamic>;
   if (p['recipient'] != verifyingContract) return 'recipient';
-  final pub = base58.decode((v['public_key'] as String).replaceFirst('ed25519:', ''));
-  final sig = base58.decode((v['signature'] as String).replaceFirst('ed25519:', ''));
+  final pub = _untag(v['public_key']), sig = _untag(v['signature']);
   final nonce = base64.decode(p['nonce']);
   final ok = await _ed.verify(nep413Hash(p['message'], nonce, verifyingContract),
       signature: Signature(sig, publicKey: SimplePublicKey(pub, type: KeyPairType.ed25519)));
