@@ -13,7 +13,7 @@ const MAX_VOUCHERS = 500;
 
 export function buildServer(opts: { chain: Chain; attestationKey: Uint8Array; now?: () => Date }) {
   const now = opts.now ?? (() => new Date());
-  const settler = new Settler(opts.chain);
+  const settler = new Settler(opts.chain, now);
   const app = Fastify();
 
   /** The key the app must pin to trust this relayer's attestations. */

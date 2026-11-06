@@ -72,10 +72,12 @@ class PaymentRequest {
   }
 }
 
-/// Payer side, offline: sign a voucher that pays exactly [request].
-Future<Map<String, dynamic>> signPayment(SimpleKeyPair key, PaymentRequest request) => signVoucher(
+/// Payer side, offline: sign a voucher that pays exactly [request]. [seq] and [prev] place it in
+/// the payer's sequence chain (see nextSequence in guards.dart); the defaults are a first payment.
+Future<Map<String, dynamic>> signPayment(SimpleKeyPair key, PaymentRequest request, {int seq = 1, String prev = '00'}) =>
+    signVoucher(
     key,
-    [Transfer(request.receiverId, {request.token: request.amount}, memo: request.memoTag)],
+    [Transfer(request.receiverId, {request.token: request.amount}, memo: '${request.memoTag} seq:$seq prev:$prev')],
     DateTime.now().add(_voucherLifetime),
     makeNonce());
 
@@ -114,12 +116,15 @@ Future<({Map<String, dynamic>? voucher, String? reason})> checkPayment(String qr
 /// voucher that arrives by radio mark a request as paid: nobody is holding up a phone, and two
 /// customers paying the same amount are otherwise indistinguishable. A voucher naming two
 /// requests counts for neither, or one payment could satisfy two tills.
-bool namesRequest(Map<String, dynamic> v, PaymentRequest request) {
+bool namesRequest(Map<String, dynamic> v, PaymentRequest request) =>
+    memoEntries(v).where((e) => e.startsWith('req:')).join(' ') == request.memoTag;
+
+/// The entries of a voucher's memo ("req:9f2c seq:17 prev:00"), or none if it has no such memo.
+List<String> memoEntries(Map<String, dynamic> v) {
   try {
-    final memo = jsonDecode(v['payload']['message'])['intents'][0]['memo'];
-    return memo is String && memo.split(' ').where((e) => e.startsWith('req:')).join(' ') == request.memoTag;
+    return (jsonDecode(v['payload']['message'])['intents'][0]['memo'] as String).split(' ');
   } catch (_) {
-    return false;
+    return const [];
   }
 }
 

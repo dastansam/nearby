@@ -13,9 +13,16 @@ enum VoucherKind { sent, received, relayed }
 /// What the relayer reported about a voucher: it is on chain, or it never will be.
 enum Outcome { settled, failed }
 
-/// [outcome] is null until the relayer has given a final answer; [tx] is the settling transaction
-/// when it knew it.
-typedef StoredVoucher = ({VoucherKind kind, int hops, Map<String, dynamic> voucher, Outcome? outcome, String? tx});
+/// [outcome] is null until the relayer has given a final answer. [tx] is the settling transaction
+/// and [settledAt] the relayer's clock when it settled, when the relayer knew them.
+typedef StoredVoucher = ({
+  VoucherKind kind,
+  int hops,
+  Map<String, dynamic> voucher,
+  Outcome? outcome,
+  String? tx,
+  DateTime? settledAt,
+});
 
 /// Whether a stored voucher can still settle: no final answer yet, and its deadline has not passed.
 bool canSettle(StoredVoucher s, DateTime now) => s.outcome == null && voucherDeadline(s.voucher).isAfter(now);
@@ -26,35 +33,37 @@ class VoucherStore {
   final _puts = StreamController<StoredVoucher>.broadcast(sync: true);
   VoucherStore._(this._db);
 
-  static const _outcomeColumns = ['outcome TEXT', 'tx TEXT'];
-  static final _schema = 'CREATE TABLE vouchers (key TEXT PRIMARY KEY, kind TEXT NOT NULL, '
-      'hops INTEGER NOT NULL, json TEXT NOT NULL, created_at INTEGER NOT NULL, ${_outcomeColumns.join(', ')})';
+  static Future<VoucherStore> open([String path = 'nearby.db']) async => VoucherStore._(
+      await openDatabase(path, version: 4, onCreate: (db, _) => _migrate(db, 0), onUpgrade: (db, from, _) => _migrate(db, from)));
 
-  static Future<VoucherStore> open([String path = 'nearby.db']) async => VoucherStore._(await openDatabase(path,
-      version: 3,
-      onCreate: (db, _) => db.execute(_schema),
-      onUpgrade: (db, from, _) async {
-        if (from == 2) {
-          for (final column in _outcomeColumns) {
-            await db.execute('ALTER TABLE vouchers ADD COLUMN $column');
-          }
-          return;
-        }
-        // Version 1 held only this phone's own payments, keyed by nonce. They are still unsettled
-        // claims on money, so they are carried over rather than dropped.
-        final old = await db.query('vouchers');
-        await db.execute('DROP TABLE vouchers');
-        await db.execute(_schema);
-        for (final r in old) {
-          await db.insert('vouchers', {
-            'key': voucherKey(jsonDecode(r['json'] as String)),
-            'kind': (r['sent'] == 1 ? VoucherKind.sent : VoucherKind.received).name,
-            'hops': 0,
-            'json': r['json'],
-            'created_at': r['created_at'],
-          });
-        }
-      }));
+  /// Brings a database at version [from] (0: empty) up to date, one version's changes at a time.
+  static Future<void> _migrate(Database db, int from) async {
+    if (from < 2) {
+      // Version 1 held only this phone's own payments, keyed by nonce. They are still unsettled
+      // claims on money, so they are carried over rather than dropped.
+      final old = from == 1 ? await db.query('vouchers') : const <Map<String, Object?>>[];
+      await db.execute('DROP TABLE IF EXISTS vouchers');
+      await db.execute('CREATE TABLE vouchers (key TEXT PRIMARY KEY, kind TEXT NOT NULL, hops INTEGER NOT NULL, '
+          'json TEXT NOT NULL, created_at INTEGER NOT NULL)');
+      for (final r in old) {
+        await db.insert('vouchers', {
+          'key': voucherKey(jsonDecode(r['json'] as String)),
+          'kind': (r['sent'] == 1 ? VoucherKind.sent : VoucherKind.received).name,
+          'hops': 0,
+          'json': r['json'],
+          'created_at': r['created_at'],
+        });
+      }
+    }
+    if (from < 3) {
+      await db.execute('ALTER TABLE vouchers ADD COLUMN outcome TEXT');
+      await db.execute('ALTER TABLE vouchers ADD COLUMN tx TEXT');
+    }
+    if (from < 4) {
+      await db.execute('ALTER TABLE vouchers ADD COLUMN settled_at INTEGER');
+      await db.execute('CREATE TABLE attestations (account TEXT PRIMARY KEY, as_of INTEGER NOT NULL, json TEXT NOT NULL)');
+    }
+  }
 
   /// Each voucher as it is stored or claimed, so the mesh can offer it and the screen can show it.
   Stream<StoredVoucher> get puts => _puts.stream;
@@ -86,28 +95,49 @@ class VoucherStore {
       if (claim) await txn.update('vouchers', {'kind': kind.name}, where: 'key = ?', whereArgs: [key]);
       return claim ? held.single['hops'] as int : null;
     });
-    if (storedHops != null) _puts.add((kind: kind, hops: storedHops, voucher: voucher, outcome: null, tx: null));
+    if (storedHops != null) _puts.add((kind: kind, hops: storedHops, voucher: voucher, outcome: null, tx: null, settledAt: null));
     return storedHops != null;
   }
 
-  /// Records the relayer's final answer for [voucher], with the settling [tx] if it knew one. The
-  /// row stays, so the mesh still counts the voucher as held and does not fetch it again. A
-  /// voucher recorded as settled stays settled, and keeps the transaction it has.
-  Future<void> setOutcome(Map<String, dynamic> voucher, Outcome outcome, {String? tx}) => _db.rawUpdate(
-      "UPDATE vouchers SET outcome = ?, tx = COALESCE(?, tx) WHERE key = ? AND outcome IS NOT 'settled'",
-      [outcome.name, tx, voucherKey(voucher)]);
+  /// Records the relayer's final answer for [voucher], with the settling [tx] and time [at] if it
+  /// knew them. The row stays, so the mesh still counts the voucher as held and does not fetch it
+  /// again. A voucher recorded as settled stays settled, and keeps the transaction it has.
+  Future<void> setOutcome(Map<String, dynamic> voucher, Outcome outcome, {String? tx, DateTime? at}) => _db.rawUpdate(
+      'UPDATE vouchers SET outcome = ?, tx = COALESCE(?, tx), settled_at = COALESCE(?, settled_at) '
+      "WHERE key = ? AND outcome IS NOT 'settled'",
+      [outcome.name, tx, at?.millisecondsSinceEpoch, voucherKey(voucher)]);
+
+  /// Keeps [signed] as the attestation for [account] unless a newer one is already held.
+  Future<void> saveAttestation(String account, DateTime asOf, Map<String, dynamic> signed) => _db.rawInsert(
+      'INSERT INTO attestations (account, as_of, json) VALUES (?, ?, ?) ON CONFLICT(account) DO UPDATE SET '
+      'as_of = excluded.as_of, json = excluded.json WHERE excluded.as_of > attestations.as_of',
+      [account, asOf.millisecondsSinceEpoch, jsonEncode(signed)]);
+
+  /// The signed attestation held for [account], or null.
+  Future<Map<String, dynamic>?> attestation(String account) async {
+    final rows = await _db.query('attestations', columns: ['json'], where: 'account = ?', whereArgs: [account]);
+    return rows.isEmpty ? null : jsonDecode(rows.single['json'] as String) as Map<String, dynamic>;
+  }
+
+  /// Every voucher held that [signer] signed, in any role: what this phone knows of their spending.
+  Future<List<StoredVoucher>> from(String signer) =>
+      // A range, which the primary key index can answer; LIKE would read every row. ";" follows ":".
+      _select(where: 'key >= ? AND key < ?', whereArgs: ['$signer:', '$signer;']);
 
   Future<Set<String>> keys() async => {for (final r in await _db.query('vouchers', columns: ['key'])) r['key'] as String};
 
   /// Newest first.
-  Future<List<StoredVoucher>> all() async => [
-        for (final r in await _db.query('vouchers', orderBy: 'created_at DESC'))
+  Future<List<StoredVoucher>> all() => _select();
+
+  Future<List<StoredVoucher>> _select({String? where, List<Object?>? whereArgs}) async => [
+        for (final r in await _db.query('vouchers', where: where, whereArgs: whereArgs, orderBy: 'created_at DESC'))
           (
             kind: VoucherKind.values.byName(r['kind'] as String),
             hops: r['hops'] as int,
             voucher: jsonDecode(r['json'] as String) as Map<String, dynamic>,
             outcome: r['outcome'] == null ? null : Outcome.values.byName(r['outcome'] as String),
             tx: r['tx'] as String?,
+            settledAt: r['settled_at'] == null ? null : DateTime.fromMillisecondsSinceEpoch(r['settled_at'] as int, isUtc: true),
           )
       ];
 }

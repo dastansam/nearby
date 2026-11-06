@@ -5,14 +5,36 @@ import 'package:flutter/material.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
 import '../store.dart';
+import '../voucher/attestation.dart';
+import '../voucher/guards.dart';
+import '../voucher/nep413.dart';
 import '../voucher/payment.dart';
 import 'scan.dart';
 
-/// Why [voucher] (as JSON) is not a new payment of [request], or null once it is stored as received.
-Future<String?> acceptPayment(VoucherStore store, PaymentRequest request, String voucher) async {
-  final check = await checkPayment(voucher, request);
+/// Why [handoff] is not a new payment of [request] that this payee should accept, or null once
+/// it is stored as received. [handoff] is what the payer shows: {"v": voucher, "a": attestation},
+/// where the attestation may be left out if it is already here (it travels with the voucher on the mesh).
+Future<String?> acceptPayment(VoucherStore store, PaymentRequest request, String handoff) async {
+  final Object? voucher;
+  try {
+    final j = jsonDecode(handoff) as Map;
+    await keepAttestation(store, j['a']);
+    voucher = j['v'];
+  } catch (_) {
+    return 'malformed';
+  }
+  final check = await checkPayment(jsonEncode(voucher), request);
   if (check.voucher == null) return check.reason;
-  return await store.put(check.voucher!, VoucherKind.received) ? null : 'replay';
+  final v = check.voucher!, payer = signerOf(v);
+  final refusal =
+      checkGuards(v, attestation: await attestationFor(store, payer), theirs: await store.from(payer), now: DateTime.now());
+  if (refusal != null) {
+    // The refused half of a double-spend is carried on: together with the other half it is the
+    // proof the relayer needs.
+    if (refusal == 'double-spend') await store.put(v, VoucherKind.relayed);
+    return refusal;
+  }
+  return await store.put(v, VoucherKind.received) ? null : 'replay';
 }
 
 /// Payee side: ask for an amount, show the request QR, then check the payer's voucher, which
@@ -42,7 +64,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     _mesh = widget.store.puts.listen((p) async {
       final request = _request;
       if (request == null || p.kind != VoucherKind.relayed || !namesRequest(p.voucher, request)) return;
-      _show(await acceptPayment(widget.store, request, jsonEncode(p.voucher)));
+      _show(await acceptPayment(widget.store, request, jsonEncode({'v': p.voucher})));
     });
   }
 
@@ -70,6 +92,11 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     final units = parseUsdc(_amount.text);
     if (units == null) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Enter an amount like 2.50')));
+      return;
+    }
+    if (BigInt.parse(units) > paymentCap) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('One offline payment can be at most ${formatUsdc(paymentCap.toString())}')));
       return;
     }
     setState(() => _request =
@@ -115,10 +142,14 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                 else
                   QrImageView(key: ValueKey(request.encode()), data: request.encode(), size: 260, backgroundColor: Colors.white),
                 const SizedBox(height: 16),
-                if (_paid)
-                  Text('Paid, pending settlement', style: theme.textTheme.titleLarge)
+                if (_paid) ...[
+                  Text('Paid, pending settlement', style: theme.textTheme.titleLarge),
+                  // Said out loud: without a relayer key this build cannot tell a funded payer from an empty one.
+                  if (relayerKey.isEmpty) const Text('The payer\'s balance was not checked: this build trusts no relayer'),
+                ]
                 else if (_rejection != null)
-                  Text('Rejected: $_rejection',
+                  Text('Rejected: ${guardRefusals[_rejection] ?? _rejection}',
+                      textAlign: TextAlign.center,
                       style: theme.textTheme.titleLarge?.copyWith(color: theme.colorScheme.error)),
                 if (!_paid) ...[
                   const SizedBox(height: 16),

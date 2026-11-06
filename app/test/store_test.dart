@@ -128,6 +128,52 @@ void main() {
     expect((await upgraded.all()).single.tx, 'tx1');
   });
 
+  test('a settled voucher remembers when, and the first report stands', () async {
+    // The time decides whether an attested balance already includes this payment. A later,
+    // different report must not move it across that line.
+    final at = DateTime.utc(2026, 11, 10, 8, 30);
+    await store.put(voucher, VoucherKind.received);
+    await store.setOutcome(voucher, Outcome.settled, tx: 'tx1', at: at);
+    await store.setOutcome(voucher, Outcome.settled, at: at.add(const Duration(days: 1)));
+    expect((await store.from(signerOf(voucher))).single.settledAt, at);
+  });
+
+  test('finds every voucher of one payer and nobody else\'s', () async {
+    // The balance check subtracts what this payer has spent. Missing one overstates what they
+    // have left; picking up a stranger's refuses an honest payer.
+    final fresh = await VoucherStore.open(inMemoryDatabasePath);
+    final other = await signPayment(await Ed25519().newKeyPair(), request);
+    final second = await sign('other.near', makeNonce());
+    await fresh.put(voucher, VoucherKind.received);
+    await fresh.put(second, VoucherKind.relayed, hops: 2);
+    await fresh.put(other, VoucherKind.relayed, hops: 1);
+    final theirs = await fresh.from(signerOf(voucher));
+    expect(theirs.map((s) => s.voucher['signature']), containsAll([voucher['signature'], second['signature']]));
+    expect(theirs.map((s) => signerOf(s.voucher)).toSet(), {signerOf(voucher)});
+  });
+
+  test('payments stored before balances were checked survive the upgrade', () async {
+    final dir = Directory.systemTemp.createTempSync('nearby_store_');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final path = '${dir.path}/v3.db';
+    final old = await openDatabase(path,
+        version: 3,
+        onCreate: (db, _) => db.execute('CREATE TABLE vouchers (key TEXT PRIMARY KEY, kind TEXT NOT NULL, '
+            'hops INTEGER NOT NULL, json TEXT NOT NULL, created_at INTEGER NOT NULL, outcome TEXT, tx TEXT)'));
+    await old.insert('vouchers', {
+      'key': voucherKey(voucher), 'kind': 'received', 'hops': 0, 'json': jsonEncode(voucher), 'created_at': 1,
+      'outcome': 'settled', 'tx': 'tx1', //
+    });
+    await old.close();
+
+    final upgraded = await VoucherStore.open(path);
+    final kept = (await upgraded.all()).single;
+    // Settled at a time nobody recorded: the balance check has to treat it as possibly not yet counted.
+    expect((kept.outcome, kept.tx, kept.settledAt), (Outcome.settled, 'tx1', null));
+    await upgraded.saveAttestation('acct', DateTime.utc(2026, 11, 10), {'payload': 'p'});
+    expect(await upgraded.attestation('acct'), {'payload': 'p'});
+  });
+
   test('lists what was stored', () async {
     await store.put(voucher, VoucherKind.sent);
     final stored = (await store.all()).singleWhere((s) => voucherKey(s.voucher) == voucherKey(voucher));

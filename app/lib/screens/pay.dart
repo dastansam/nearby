@@ -4,6 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
 import '../store.dart';
+import '../voucher/attestation.dart';
+import '../voucher/guards.dart';
+import '../voucher/nep413.dart';
 import '../voucher/payment.dart';
 import '../wallet.dart';
 import 'scan.dart';
@@ -31,15 +34,39 @@ Future<void> pay(BuildContext context, Wallet wallet, VoucherStore store) async 
   );
   if (confirmed != true) return;
 
-  final voucher = await signPayment(wallet.key, request);
+  final mine = await store.from(wallet.accountId);
+  final next = nextSequence(mine);
+  final voucher = await signPayment(wallet.key, request, seq: next.seq, prev: next.prev);
+  // The payee will run this same check, so a voucher that fails it here is never shown. It is
+  // not stored either, which leaves its sequence number free for the next payment.
+  final refusal = checkGuards(voucher,
+      attestation: await attestationFor(store, wallet.accountId), theirs: mine, now: DateTime.now());
+  if (refusal != null) return say(_whyNot[refusal] ?? 'Cannot pay: ${guardRefusals[refusal]}');
   await store.put(voucher, VoucherKind.sent);
   if (!context.mounted) return;
-  await Navigator.push(context, MaterialPageRoute(builder: (_) => VoucherScreen(voucher: voucher)));
+  await showVoucher(context, store, voucher);
+}
+
+/// What to tell the payer when their own phone can already see the payee would refuse.
+const _whyNot = {
+  'attestation': 'Go online once so the app can load your offline balance',
+  'stale': 'Go online once so the app can load your offline balance',
+  'balance': 'Not enough offline balance',
+};
+
+/// Shows [voucher] as a QR for the payee, together with the payer's balance attestation, which
+/// the payee needs and may not have.
+Future<void> showVoucher(BuildContext context, VoucherStore store, Map<String, dynamic> voucher) async {
+  final attestation = await store.attestation(signerOf(voucher));
+  if (!context.mounted) return;
+  final handoff = jsonEncode({'v': voucher, if (attestation != null) 'a': attestation});
+  await Navigator.push(context, MaterialPageRoute(builder: (_) => VoucherScreen(voucher: voucher, handoff: handoff)));
 }
 
 class VoucherScreen extends StatelessWidget {
   final Map<String, dynamic> voucher;
-  const VoucherScreen({super.key, required this.voucher});
+  final String handoff;
+  const VoucherScreen({super.key, required this.voucher, required this.handoff});
 
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -48,7 +75,7 @@ class VoucherScreen extends StatelessWidget {
           child: Column(mainAxisSize: MainAxisSize.min, children: [
             Text(formatUsdc(amountOf(voucher)), style: Theme.of(context).textTheme.headlineMedium),
             const SizedBox(height: 16),
-            QrImageView(data: jsonEncode(voucher), size: 320, backgroundColor: Colors.white),
+            QrImageView(data: handoff, size: 340, backgroundColor: Colors.white),
           ]),
         ),
       );

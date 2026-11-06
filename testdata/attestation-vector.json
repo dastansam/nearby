@@ -1,0 +1,15 @@
+{
+  "seed_hex": "0202020202020202020202020202020202020202020202020202020202020202",
+  "public_key": "ed25519:9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu",
+  "attestation": {
+    "account": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    "token": "nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+    "balance": "25000000",
+    "bond": "0",
+    "as_of": "2026-11-10T09:00:00.000Z"
+  },
+  "signed": {
+    "payload": "{\"account\":\"8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c\",\"token\":\"nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1\",\"balance\":\"25000000\",\"bond\":\"0\",\"as_of\":\"2026-11-10T09:00:00.000Z\"}",
+    "signature": "ed25519:4Cy8B17LArNS8fYk19hHZVqACz3ALtfsTBnaXasSRC9MTj1mB9TnNGx4wivXsbHsHjzEBtAn2ufUSU3mtzjp1iFe"
+  }
+}

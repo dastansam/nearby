@@ -3,8 +3,12 @@ import { Refused, type Chain } from "./chain.ts";
 import { USDC_TOKEN, verifyVoucher, type IntentMessage, type SignedVoucher } from "./voucher.ts";
 
 export type Result =
-  /** On chain. `tx` is missing when someone else settled it or this relayer restarted since. */
-  | { status: "settled"; tx?: string }
+  /**
+   * On chain. `tx` and `at` (this relayer's clock when it settled, ISO 8601) are missing when
+   * someone else settled it or this relayer restarted since. `at` is on the same clock as an
+   * attestation's `as_of`, so a phone can tell whether an attested balance already reflects it.
+   */
+  | { status: "settled"; tx?: string; at?: string }
   /** Not a voucher this relayer settles, or one that can no longer settle. It never will: stop sending it. */
   | { status: "invalid"; reason: string }
   /** The contract refuses it today (say, the payer's balance is short). It may settle later. */
@@ -12,7 +16,7 @@ export type Result =
   /** The relayer could not reach the chain. Nothing is known about the voucher: send it again. */
   | { status: "error"; reason: string };
 
-const settled = (tx?: string): Result => (tx ? { status: "settled", tx } : { status: "settled" });
+const settled = (sent: { tx?: string; at?: string }): Result => ({ status: "settled", ...(sent.tx ? { tx: sent.tx, at: sent.at } : {}) });
 const invalid = (reason: string): Result => ({ status: "invalid", reason });
 
 /** How long a refusal is repeated without asking the chain again: every phone carrying the voucher re-uploads it. */
@@ -32,12 +36,12 @@ export class Settler {
    * "signer:nonce" -> the voucher that spent that nonce and its tx, when this relayer sent it.
    * An empty entry means the chain says the nonce is spent and we do not know by which voucher.
    */
-  private readonly done = new Map<string, { signature?: string; tx?: string }>();
+  private readonly done = new Map<string, { signature?: string; tx?: string; at?: string }>();
   private readonly refused = new Map<string, { reason: string; until: number }>(); // by signature
   private readonly bySeq = new Map<string, SignedVoucher>(); // "signer:seq" -> first voucher seen
   private queue: Promise<unknown> = Promise.resolve();
 
-  constructor(private readonly chain: Chain) {}
+  constructor(private readonly chain: Chain, private readonly now: () => Date = () => new Date()) {}
 
   /**
    * One result per input, in order. Across all uploads, vouchers are handled one at a time: two
@@ -81,18 +85,18 @@ export class Settler {
       // A nonce settles one voucher. Another voucher on the same nonce did not get paid by that
       // transaction, so it must not be told "settled".
       const spent = this.done.get(slot);
-      if (spent) return spent.signature === undefined || spent.signature === v.signature ? settled(spent.tx) : invalid("nonce spent by another voucher");
+      if (spent) return spent.signature === undefined || spent.signature === v.signature ? settled(spent) : invalid("nonce spent by another voucher");
       const refusal = this.refused.get(v.signature);
       if (refusal && refusal.until > Date.now()) return { status: "rejected", reason: refusal.reason };
       if (await this.chain.isNonceUsed(signer, v.payload.nonce)) {
         this.done.set(slot, {});
-        return settled();
+        return settled({});
       }
       if (expired) return invalid("expired");
       await this.chain.simulate(v); // free; execute costs gas even when it fails
-      const tx = await this.chain.execute(v);
-      this.done.set(slot, { signature: v.signature, tx });
-      return settled(tx);
+      const sent = { signature: v.signature, tx: await this.chain.execute(v), at: this.now().toISOString() };
+      this.done.set(slot, sent);
+      return settled(sent);
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
       if (!(e instanceof Refused)) return { status: "error", reason };

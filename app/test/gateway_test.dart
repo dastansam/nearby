@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -7,9 +8,12 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:nearby/gateway.dart';
 import 'package:nearby/store.dart';
+import 'package:nearby/voucher/attestation.dart';
 import 'package:nearby/voucher/nep413.dart';
 import 'package:nearby/voucher/payment.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+
+import 'fake_relayer.dart';
 
 void main() {
   sqfliteFfiInit();
@@ -159,6 +163,60 @@ void main() {
     await store.put(arrived, VoucherKind.relayed, hops: 1);
     await second.future.timeout(const Duration(seconds: 5));
     expect(uploads.last, [arrived]);
+  });
+
+  test('records when the relayer says a payment settled', () async {
+    // A payee later compares this with the time of the payer's attested balance, both by the relayer's clock.
+    final v = await voucher();
+    await store.put(v, VoucherKind.received);
+    await gateway((_) => {'status': 'settled', 'tx': 'tx1', 'at': '2026-11-10T08:30:00.000Z'}).sync();
+    expect((await stored(v)).settledAt, DateTime.utc(2026, 11, 10, 8, 30));
+  });
+
+  group('the balance attestation', () {
+    const account = 'payer.near';
+    late VoucherStore mine;
+    late List<String> fetched;
+
+    setUp(() async {
+      final dir = Directory.systemTemp.createTempSync('nearby_gateway_');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      mine = await VoucherStore.open('${dir.path}/mine.db');
+      fetched = [];
+    });
+    tearDown(() => relayerKey = '');
+
+    /// One attempt, as the app makes them, against a relayer with nothing to settle that attests 5 USDC.
+    Future<void> attempt({bool trusted = true}) async {
+      final relayer = await Ed25519().newKeyPair();
+      relayerKey = trusted ? await publicKeyOf(relayer) : '';
+      final done = Completer<void>();
+      final g = Gateway(mine, 'https://relayer.test',
+          account: account,
+          onChange: () => done.isCompleted ? null : done.complete(),
+          client: MockClient((request) async {
+            if (request.method == 'POST') return http.Response(jsonEncode({'results': []}), 200);
+            fetched.add(request.url.toString());
+            return http.Response(jsonEncode(await signAttestation(relayer, account, '5000000')), 200);
+          }));
+      g.start();
+      await done.future.timeout(const Duration(seconds: 5));
+      g.stop();
+      expect(g.problem, isNull);
+    }
+
+    // Without one, this phone's payments are refused everywhere once it leaves coverage, so it
+    // is fetched whenever the relayer is reachable, without the user asking.
+    test('is fetched for this phone\'s account whenever the relayer is reachable', () async {
+      await attempt();
+      expect(fetched, ['https://relayer.test/attestation/$account']);
+      expect((await attestationFor(mine, account))!.balance, BigInt.from(5000000));
+    });
+
+    test('is not fetched by a build that trusts no relayer, which could not check it', () async {
+      await attempt(trusted: false);
+      expect(fetched, isEmpty);
+    });
   });
 
   test('an answer that does not cover every voucher settles none of them', () async {
