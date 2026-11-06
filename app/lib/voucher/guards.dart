@@ -15,7 +15,12 @@ final paymentCap = BigInt.from(25000000);
 String? memoEntry(Map<String, dynamic> v, String name) =>
     memoEntries(v).where((e) => e.startsWith('$name:')).map((e) => e.substring(name.length + 1)).firstOrNull;
 
-int? _seq(Map<String, dynamic> v) => int.tryParse(memoEntry(v, 'seq') ?? '');
+/// A voucher's sequence number. Only the one plain spelling counts: the relayer pairs double-spends
+/// by the text of the number, so "5" and "05" must not both be accepted as the fifth voucher.
+int? _seq(Map<String, dynamic> v) {
+  final seq = memoEntry(v, 'seq') ?? '';
+  return RegExp(r'^[1-9][0-9]*$').hasMatch(seq) ? int.tryParse(seq) : null;
+}
 
 /// USDC that [v] would move out of its signer's balance. Read defensively: a relayed voucher
 /// has only had its signature checked, so its contents can be anything.
@@ -24,7 +29,8 @@ BigInt usdcOut(Map<String, dynamic> v) {
     var total = BigInt.zero;
     for (final intent in jsonDecode(v['payload']['message'])['intents'] as List) {
       final amount = intent['intent'] == 'transfer' ? intent['tokens'][usdcToken] : null;
-      if (amount is String) total += BigInt.parse(amount);
+      // Digits only: a "negative amount" must not add to what the payer appears to have left.
+      if (amount is String && RegExp(r'^[0-9]+$').hasMatch(amount)) total += BigInt.parse(amount);
     }
     return total;
   } catch (_) {
@@ -37,12 +43,12 @@ BigInt usdcOut(Map<String, dynamic> v) {
 BigInt spendable(Attestation a, Iterable<StoredVoucher> theirs) =>
     theirs.fold(a.balance, (left, s) => _reflected(s, a) ? left : left - usdcOut(s.voucher));
 
-/// A voucher that never will move money, or that moved it before the relayer read the balance,
-/// is already accounted for. Anything else may still come out of that balance, including one
-/// reported settled with no time (assume the worst: after the reading).
+/// A voucher that never will move money, or that had moved it by the block the balance was read
+/// at, is already accounted for. Anything else may still come out of that balance, including one
+/// reported settled with no block yet (assume the worst: after the reading).
 bool _reflected(StoredVoucher s, Attestation a) =>
     s.outcome == Outcome.failed ||
-    (s.outcome == Outcome.settled && s.settledAt != null && !s.settledAt!.isAfter(a.asOf));
+    (s.outcome == Outcome.settled && s.settledBlock != null && s.settledBlock! <= a.block);
 
 /// The sequence number and "prev" fingerprint for a payer's next voucher, given the ones
 /// they have signed ([mine]). The chain lets anyone prove a double-spend; it never orders settlement.
@@ -71,7 +77,7 @@ String? checkGuards(
   if (amount > paymentCap) return 'cap';
 
   final seq = _seq(voucher);
-  if (seq == null || seq < 1) return 'sequence';
+  if (seq == null) return 'sequence';
   final others = theirs.where((s) => s.voucher['signature'] != voucher['signature']).toList();
   for (final s in others) {
     // One number, two vouchers: the payer has signed away the same place in their chain twice.

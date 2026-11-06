@@ -4,11 +4,12 @@ import { USDC_TOKEN, verifyVoucher, type IntentMessage, type SignedVoucher } fro
 
 export type Result =
   /**
-   * On chain. `tx` and `at` (this relayer's clock when it settled, ISO 8601) are missing when
-   * someone else settled it or this relayer restarted since. `at` is on the same clock as an
-   * attestation's `as_of`, so a phone can tell whether an attested balance already reflects it.
+   * On chain. `tx` is missing when someone else settled it or this relayer restarted since.
+   * `block` is a height by which the chain showed it settled: an attestation read at that height
+   * or later already reflects the payment. It is missing only until the RPC node shows the
+   * transaction, so a phone should ask again.
    */
-  | { status: "settled"; tx?: string; at?: string }
+  | { status: "settled"; tx?: string; block?: number }
   /** Not a voucher this relayer settles, or one that can no longer settle. It never will: stop sending it. */
   | { status: "invalid"; reason: string }
   /** The contract refuses it today (say, the payer's balance is short). It may settle later. */
@@ -16,7 +17,8 @@ export type Result =
   /** The relayer could not reach the chain. Nothing is known about the voucher: send it again. */
   | { status: "error"; reason: string };
 
-const settled = (sent: { tx?: string; at?: string }): Result => ({ status: "settled", ...(sent.tx ? { tx: sent.tx, at: sent.at } : {}) });
+type Spent = { signature?: string; tx?: string; block?: number };
+const settled = ({ tx, block }: Spent): Result => ({ status: "settled", ...(tx ? { tx } : {}), ...(block !== undefined ? { block } : {}) });
 const invalid = (reason: string): Result => ({ status: "invalid", reason });
 
 /** How long a refusal is repeated without asking the chain again: every phone carrying the voucher re-uploads it. */
@@ -34,14 +36,14 @@ export class Settler {
 
   /**
    * "signer:nonce" -> the voucher that spent that nonce and its tx, when this relayer sent it.
-   * An empty entry means the chain says the nonce is spent and we do not know by which voucher.
+   * No signature means the chain says the nonce is spent and we do not know by which voucher.
    */
-  private readonly done = new Map<string, { signature?: string; tx?: string; at?: string }>();
+  private readonly done = new Map<string, Spent>();
   private readonly refused = new Map<string, { reason: string; until: number }>(); // by signature
   private readonly bySeq = new Map<string, SignedVoucher>(); // "signer:seq" -> first voucher seen
   private queue: Promise<unknown> = Promise.resolve();
 
-  constructor(private readonly chain: Chain, private readonly now: () => Date = () => new Date()) {}
+  constructor(private readonly chain: Chain) {}
 
   /**
    * One result per input, in order. Across all uploads, vouchers are handled one at a time: two
@@ -85,17 +87,25 @@ export class Settler {
       // A nonce settles one voucher. Another voucher on the same nonce did not get paid by that
       // transaction, so it must not be told "settled".
       const spent = this.done.get(slot);
-      if (spent) return spent.signature === undefined || spent.signature === v.signature ? settled(spent) : invalid("nonce spent by another voucher");
+      if (spent?.signature !== undefined && spent.signature !== v.signature) return invalid("nonce spent by another voucher");
+      if (spent?.block !== undefined) return settled(spent);
       const refusal = this.refused.get(v.signature);
-      if (refusal && refusal.until > Date.now()) return { status: "rejected", reason: refusal.reason };
-      if (await this.chain.isNonceUsed(signer, v.payload.nonce)) {
-        this.done.set(slot, {});
-        return settled({});
+      if (!spent && refusal && refusal.until > Date.now()) return { status: "rejected", reason: refusal.reason };
+      const seen = await this.chain.isNonceUsed(signer, v.payload.nonce);
+      if (seen.used) {
+        const known = { ...spent, block: seen.block };
+        this.done.set(slot, known);
+        return settled(known);
       }
+      if (spent) return settled(spent); // we sent it; the node asked just now has not caught up
       if (expired) return invalid("expired");
       await this.chain.simulate(v); // free; execute costs gas even when it fails
-      const sent = { signature: v.signature, tx: await this.chain.execute(v), at: this.now().toISOString() };
+      const sent: Spent = { signature: v.signature, tx: await this.chain.execute(v) };
       this.done.set(slot, sent);
+      // Recorded first, then the block is asked for: failing to learn it, or a node that does not
+      // show the transaction yet, must not turn a settled voucher into an error. The next upload fills it in.
+      const after = await this.chain.isNonceUsed(signer, v.payload.nonce).catch(() => undefined);
+      if (after?.used) sent.block = after.block;
       return settled(sent);
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);

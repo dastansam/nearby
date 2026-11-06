@@ -66,8 +66,9 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _load() async {
+    final Wallet wallet;
     try {
-      final wallet = await Wallet.load();
+      wallet = await Wallet.load();
       _store = await VoucherStore.open();
       if (mounted) setState(() => _wallet = wallet);
       await _reloadVouchers();
@@ -81,6 +82,7 @@ class _HomeScreenState extends State<HomeScreen> {
       }
       return;
     }
+    if (!mounted) return;
     // Paying and receiving by QR work without the mesh, so a mesh failure is shown, not fatal.
     // A phone met after a while hands over its vouchers in a burst; one reload covers the burst.
     _puts = _store.puts.listen((_) => _reload ??= Timer(const Duration(milliseconds: 300), () {
@@ -88,7 +90,7 @@ class _HomeScreenState extends State<HomeScreen> {
           _reloadVouchers();
         }));
     if (relayerUrl.isNotEmpty) {
-      _gateway = Gateway(_store, relayerUrl, account: _wallet!.accountId, onChange: _reloadVouchers)..start();
+      _gateway = Gateway(_store, relayerUrl, account: wallet.accountId, onChange: _reloadVouchers)..start();
     }
     final gossip = Gossip(NearbyTransport(), _store, onChange: () {
       if (mounted) setState(() {});
@@ -145,7 +147,9 @@ class _HomeScreenState extends State<HomeScreen> {
       _carried = all.where((v) => v.kind == VoucherKind.relayed && canSettle(v, now)).length;
       _waiting = all.where((v) => canSettle(v, now)).length;
       _attested = attested;
-      _budget = attested == null ? BigInt.zero : spendable(attested, mine);
+      // Never shown below zero: signed for more than was attested just means nothing is left.
+      final left = attested == null ? BigInt.zero : spendable(attested, mine);
+      _budget = left.isNegative ? BigInt.zero : left;
     });
   }
 

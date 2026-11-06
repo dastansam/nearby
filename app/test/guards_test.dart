@@ -19,6 +19,7 @@ void main() {
 
   final now = DateTime.utc(2026, 11, 11, 12);
   final readAt = now.subtract(const Duration(hours: 2)); // when the relayer read the payer's balance
+  const readBlock = 5000; // and the block it read it at
   late SimpleKeyPair payer;
   late String payerId;
 
@@ -36,11 +37,11 @@ void main() {
       signPayment(payer, PaymentRequest(receiverId: to, token: usdcToken, amount: amount, id: newRequestId()),
           seq: seq, prev: prev);
 
-  StoredVoucher seen(Map<String, dynamic> v, {Outcome? outcome, DateTime? settledAt}) =>
-      (kind: VoucherKind.relayed, hops: 1, voucher: v, outcome: outcome, tx: null, settledAt: settledAt);
+  StoredVoucher seen(Map<String, dynamic> v, {Outcome? outcome, int? settledBlock}) =>
+      (kind: VoucherKind.relayed, hops: 1, voucher: v, outcome: outcome, tx: null, settledBlock: settledBlock);
 
   Attestation attested(String balance, {DateTime? asOf, String? account}) =>
-      (account: account ?? payerId, token: usdcToken, balance: BigInt.parse(balance), asOf: asOf ?? readAt);
+      (account: account ?? payerId, token: usdcToken, balance: BigInt.parse(balance), asOf: asOf ?? readAt, block: readBlock);
 
   String? refusal(Map<String, dynamic> v, {Attestation? a, List<StoredVoucher> theirs = const []}) =>
       checkGuards(v, attestation: a, theirs: theirs, now: now);
@@ -70,15 +71,18 @@ void main() {
       // Subtracting it again would refuse an honest payer every time they come back.
       final old = await pay('2500000');
       final today = await pay('2500000', seq: 2, prev: voucherHash(old));
-      final settledBefore = seen(old, outcome: Outcome.settled, settledAt: readAt.subtract(const Duration(hours: 1)));
-      expect(refusal(today, a: attested('2500000'), theirs: [settledBefore]), isNull);
+      for (final block in [readBlock - 900, readBlock]) {
+        final settledBy = seen(old, outcome: Outcome.settled, settledBlock: block);
+        expect(refusal(today, a: attested('2500000'), theirs: [settledBy]), isNull, reason: 'settled by block $block');
+      }
     });
 
-    test('counts a payment that settled after the balance was read, or at an unknown time', () async {
+    test('counts a payment that settled after the balance was read, or in an unknown block', () async {
       // The attested number is from before that money left, so it is still too high by that much.
+      // One block is enough: the relayer may have read the balance from a node a block behind.
       final old = await pay('2500000');
       final next = await pay('2500000', seq: 2, prev: voucherHash(old));
-      final after = seen(old, outcome: Outcome.settled, settledAt: readAt.add(const Duration(minutes: 5)));
+      final after = seen(old, outcome: Outcome.settled, settledBlock: readBlock + 1);
       expect(refusal(next, a: attested('3000000'), theirs: [after]), 'balance');
       expect(refusal(next, a: attested('3000000'), theirs: [seen(old, outcome: Outcome.settled)]), 'balance');
     });
@@ -87,6 +91,15 @@ void main() {
       final dead = await pay('2500000');
       final next = await pay('2500000', seq: 2, prev: voucherHash(dead));
       expect(refusal(next, a: attested('3000000'), theirs: [seen(dead, outcome: Outcome.failed)]), isNull);
+    });
+
+    test('a voucher for a negative amount does not add to what the payer has left', () async {
+      // Anyone can sign nonsense and let the mesh carry it. Counted as written, "-25 USDC spent"
+      // would turn an empty account into one good for 25.
+      final junk = await signVoucher(payer, [Transfer('x.near', {usdcToken: '-25000000'}, memo: 'seq:1 prev:00')],
+          now.add(const Duration(hours: 72)), makeNonce());
+      final real = await pay('25000000', seq: 2, prev: voucherHash(junk));
+      expect(refusal(real, a: attested('0'), theirs: [seen(junk)]), 'balance');
     });
 
     test('showing the same voucher again does not count it against itself', () async {
@@ -127,6 +140,16 @@ void main() {
       final v = await signVoucher(payer, [Transfer('merchant.near', {usdcToken: '1000000'}, memo: 'req:aa')],
           now.add(const Duration(hours: 72)), makeNonce());
       expect(refusal(v, a: attested('9000000')), 'sequence');
+    });
+
+    test('a sequence number spelled any other way than plainly is refused', () async {
+      // The relayer pairs double-spends by the number as written. If "05" were accepted as 5, a
+      // payer could spend place 5 twice and the two vouchers would never be matched up.
+      for (final spelling in ['05', '+5', '0x5', '5.0', '0', '-1']) {
+        final v = await signVoucher(payer, [Transfer('merchant.near', {usdcToken: '1000000'}, memo: 'req:aa seq:$spelling prev:aa')],
+            now.add(const Duration(hours: 72)), makeNonce());
+        expect(refusal(v, a: attested('9000000')), 'sequence', reason: spelling);
+      }
     });
 
     test('a voucher that claims to follow a different voucher than the one held is refused', () async {

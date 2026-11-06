@@ -20,7 +20,9 @@ const attestationLifetime = Duration(hours: 24);
 /// Must match ATTESTATION_DOMAIN in relayer/src/attestation.ts.
 const _domain = 'NearBy balance attestation v1\n';
 
-typedef Attestation = ({String account, String token, BigInt balance, DateTime asOf});
+/// [asOf] is the relayer's clock, for how long the statement is good. [block] is the height the
+/// balance was read at, for what it includes: every payment settled by that block, and none after.
+typedef Attestation = ({String account, String token, BigInt balance, DateTime asOf, int block});
 
 /// Whether [a] is too old to accept payments against.
 bool isStale(Attestation a, DateTime now) => a.asOf.add(attestationLifetime).isBefore(now);
@@ -38,6 +40,7 @@ Future<Attestation?> readAttestation(dynamic signed) async {
       token: a['token'] as String,
       balance: BigInt.parse(a['balance']),
       asOf: DateTime.parse(a['as_of']),
+      block: a['block'] as int,
     );
   } catch (_) {
     return null;

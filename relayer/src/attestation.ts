@@ -10,6 +10,12 @@ export interface Attestation {
   balance: string; // token base units inside intents.near
   bond: string;
   as_of: string; // ISO 8601; the app treats it as valid for 24 h
+  /**
+   * Height of the block the balance was read at. A payment settled by this height is already in
+   * the balance; a later one is not. Heights, not clocks: the reading and the settlement can
+   * come from RPC nodes that are a block apart.
+   */
+  block: number;
 }
 
 export interface SignedAttestation {
@@ -21,8 +27,8 @@ export interface SignedAttestation {
 export const ATTESTATION_DOMAIN = "NearBy balance attestation v1\n";
 
 export function signAttestation(secretKey: Uint8Array, a: Attestation): SignedAttestation {
-  const { account, token, balance, bond, as_of } = a;
-  const payload = JSON.stringify({ account, token, balance, bond, as_of });
+  const { account, token, balance, bond, as_of, block } = a;
+  const payload = JSON.stringify({ account, token, balance, bond, as_of, block });
   const sig = ed25519.sign(new TextEncoder().encode(ATTESTATION_DOMAIN + payload), secretKey);
   return { payload, signature: "ed25519:" + bs58.encode(sig) };
 }

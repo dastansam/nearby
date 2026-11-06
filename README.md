@@ -53,6 +53,11 @@ Not yet proven: no voucher has settled with a funded account (only dry runs agai
 
 Double-spending offline is bounded and provable, not prevented. A payer can still overspend across merchants who have not seen each other's vouchers, up to 25 USDC each. Two vouchers with one sequence number prove it, and the relayer keeps such pairs, but the bond contract that would punish it is not built yet.
 
+Two known rough edges of the offline check:
+
+- A merchant whose phone stays offline counts a customer's earlier payment against them until that phone learns it settled, so a returning customer can be refused although their new attested balance already reflects it. Nothing tells an offline phone about settlements yet.
+- A refusal cannot unsign a voucher. A payment the merchant's phone refused can still be carried to the relayer and settle; the receive screen says so.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

@@ -13,7 +13,7 @@ const MAX_VOUCHERS = 500;
 
 export function buildServer(opts: { chain: Chain; attestationKey: Uint8Array; now?: () => Date }) {
   const now = opts.now ?? (() => new Date());
-  const settler = new Settler(opts.chain, now);
+  const settler = new Settler(opts.chain);
   const app = Fastify();
 
   /** The key the app must pin to trust this relayer's attestations. */
@@ -36,13 +36,8 @@ export function buildServer(opts: { chain: Chain; attestationKey: Uint8Array; no
     const { account } = req.params as { account: string };
     // Offline accounts are implicit ones: the hex of the key that signs their vouchers.
     if (!/^[0-9a-f]{64}$/.test(account)) return reply.code(400).send({ error: "not an implicit account" });
-    return signAttestation(opts.attestationKey, {
-      account,
-      token: USDC_TOKEN,
-      balance: await opts.chain.balanceOf(account, USDC_TOKEN),
-      bond: "0", // no bond contract yet
-      as_of: now().toISOString(),
-    });
+    const { balance, block } = await opts.chain.balanceOf(account, USDC_TOKEN);
+    return signAttestation(opts.attestationKey, { account, token: USDC_TOKEN, balance, bond: "0" /* no bond contract yet */, as_of: now().toISOString(), block });
   });
 
   /** Proofs of double-spending seen so far, for whoever submits them to the bond contract. */

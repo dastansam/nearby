@@ -14,14 +14,14 @@ enum VoucherKind { sent, received, relayed }
 enum Outcome { settled, failed }
 
 /// [outcome] is null until the relayer has given a final answer. [tx] is the settling transaction
-/// and [settledAt] the relayer's clock when it settled, when the relayer knew them.
+/// and [settledBlock] a block height by which it had settled, when the relayer knew them.
 typedef StoredVoucher = ({
   VoucherKind kind,
   int hops,
   Map<String, dynamic> voucher,
   Outcome? outcome,
   String? tx,
-  DateTime? settledAt,
+  int? settledBlock,
 });
 
 /// Whether a stored voucher can still settle: no final answer yet, and its deadline has not passed.
@@ -60,7 +60,7 @@ class VoucherStore {
       await db.execute('ALTER TABLE vouchers ADD COLUMN tx TEXT');
     }
     if (from < 4) {
-      await db.execute('ALTER TABLE vouchers ADD COLUMN settled_at INTEGER');
+      await db.execute('ALTER TABLE vouchers ADD COLUMN settled_block INTEGER');
       await db.execute('CREATE TABLE attestations (account TEXT PRIMARY KEY, as_of INTEGER NOT NULL, json TEXT NOT NULL)');
     }
   }
@@ -95,17 +95,18 @@ class VoucherStore {
       if (claim) await txn.update('vouchers', {'kind': kind.name}, where: 'key = ?', whereArgs: [key]);
       return claim ? held.single['hops'] as int : null;
     });
-    if (storedHops != null) _puts.add((kind: kind, hops: storedHops, voucher: voucher, outcome: null, tx: null, settledAt: null));
+    if (storedHops != null) _puts.add((kind: kind, hops: storedHops, voucher: voucher, outcome: null, tx: null, settledBlock: null));
     return storedHops != null;
   }
 
-  /// Records the relayer's final answer for [voucher], with the settling [tx] and time [at] if it
+  /// Records the relayer's final answer for [voucher], with the settling [tx] and [block] if it
   /// knew them. The row stays, so the mesh still counts the voucher as held and does not fetch it
-  /// again. A voucher recorded as settled stays settled, and keeps the transaction it has.
-  Future<void> setOutcome(Map<String, dynamic> voucher, Outcome outcome, {String? tx, DateTime? at}) => _db.rawUpdate(
-      'UPDATE vouchers SET outcome = ?, tx = COALESCE(?, tx), settled_at = COALESCE(?, settled_at) '
-      "WHERE key = ? AND outcome IS NOT 'settled'",
-      [outcome.name, tx, at?.millisecondsSinceEpoch, voucherKey(voucher)]);
+  /// again. A voucher recorded as settled stays settled, and keeps the transaction and block it
+  /// has; ones it lacks can still be filled in.
+  Future<void> setOutcome(Map<String, dynamic> voucher, Outcome outcome, {String? tx, int? block}) => _db.rawUpdate(
+      "UPDATE vouchers SET outcome = CASE outcome WHEN 'settled' THEN outcome ELSE ? END, "
+      'tx = COALESCE(tx, ?), settled_block = COALESCE(settled_block, ?) WHERE key = ?',
+      [outcome.name, outcome == Outcome.settled ? tx : null, outcome == Outcome.settled ? block : null, voucherKey(voucher)]);
 
   /// Keeps [signed] as the attestation for [account] unless a newer one is already held.
   Future<void> saveAttestation(String account, DateTime asOf, Map<String, dynamic> signed) => _db.rawInsert(
@@ -137,7 +138,7 @@ class VoucherStore {
             voucher: jsonDecode(r['json'] as String) as Map<String, dynamic>,
             outcome: r['outcome'] == null ? null : Outcome.values.byName(r['outcome'] as String),
             tx: r['tx'] as String?,
-            settledAt: r['settled_at'] == null ? null : DateTime.fromMillisecondsSinceEpoch(r['settled_at'] as int, isUtc: true),
+            settledBlock: r['settled_block'] as int?,
           )
       ];
 }

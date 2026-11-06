@@ -20,8 +20,8 @@ void main() {
 
   test('reads an attestation the relayer signed', () async {
     final a = (await readAttestation(signed))!;
-    expect((a.account, a.balance, a.asOf),
-        (vector['attestation']['account'], BigInt.from(25000000), DateTime.utc(2026, 11, 10, 9)));
+    expect((a.account, a.balance, a.asOf, a.block),
+        (vector['attestation']['account'], BigInt.from(25000000), DateTime.utc(2026, 11, 10, 9), 223318485));
   });
 
   // A payee hands over goods against this number.

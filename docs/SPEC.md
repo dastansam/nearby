@@ -6,6 +6,8 @@ Local copy of the living spec at https://claude.ai/artifact/WL5vbTkHi7PiMb4KZXe9
 
 **This file is newer on the payment request (2026-11-06).** A request carries a random `id` that the payer signs into the memo as `req:<id>` (steps 3 and 4). A voucher arriving over the mesh marks a request as paid only if it names that request and no other: without the id it cannot be told apart from another customer's payment of the same amount. A scanned voucher is accepted whatever request it names, so a payee who re-enters the amount can still take a voucher already signed. Mainnet `simulate_intents` accepts such memos.
 
+**This file is newer on the balance attestation (2026-11-06).** It also carries `block`, the height the balance was read at, and the relayer reports the block by which each voucher settled. A payee subtracts a voucher it has seen unless it settled by the attestation's block. Clock times cannot decide that: the balance and the settlement may come from RPC nodes a block apart.
+
 We ship a Flutter app that pays with no internet. The payer signs a NEAR transfer on the phone, nearby phones relay it hop by hop over Bluetooth, and the first phone with a signal settles it on NEAR. Deadline: Nov 14, 23:59 UTC, 9 days from today.
 
 ## Overview
@@ -67,7 +69,7 @@ The phones in the offline zone never need the internet. The merchant trusts the 
 The voucher is a standard NEAR Intents `transfer` intent, signed with NEP-413. We don't need our own settlement contract: anyone holding the voucher can submit it to `intents.near`, and the signature alone authorizes the transfer ([intent types](https://docs.near-intents.org/integration/verifier-contract/intent-types-and-execution), [signing](https://docs.near-intents.org/integration/verifier-contract/signing-intents)).
 
 1. **Top up (online, once).** The app creates an offline ed25519 key held only on the phone. Its implicit account (the hex of the key) needs no `add_public_key`. The user locks a bond in the NearBy bond contract and funds the same account inside `intents.near` with `ft_transfer_call`, in USDC. That deposit is the offline budget.
-2. **Refresh credential (online).** The relayer signs a balance attestation `{account, token, balance, bond, as_of}`, valid 24 h. The app caches it; merchants check it against the relayer key pinned in the app.
+2. **Refresh credential (online).** The relayer signs a balance attestation `{account, token, balance, bond, as_of, block}`, valid 24 h. The app caches it; merchants check it against the relayer key pinned in the app.
 3. **Pay (offline).** The merchant shows a QR code with `{receiver_id, amount, token, id}`, where `id` is random per request. The payer signs the intent with a random nonce, a 72 h deadline, the request id (memo entry `req:<id>`) and the next sequence number, then sends the voucher over Nearby Connections (QR as a fallback).
 4. **Verify (offline).** The merchant checks the signature, (for a voucher that arrives by radio rather than by scanning) that it names the request on screen, that `signer_id` matches the key, the deadline, the nonce, the sequence chain, and the attested balance minus vouchers already seen from this payer. If all pass: "Paid, pending settlement".
 5. **Relay (offline, store-and-forward).** Every phone keeps an outbox. When two phones connect, they swap voucher hashes and send what the other lacks; each voucher carries a hop count that stops at 8. A phone carries its outbox until it meets someone.

@@ -15,14 +15,14 @@ import 'scan.dart';
 /// it is stored as received. [handoff] is what the payer shows: {"v": voucher, "a": attestation},
 /// where the attestation may be left out if it is already here (it travels with the voucher on the mesh).
 Future<String?> acceptPayment(VoucherStore store, PaymentRequest request, String handoff) async {
-  final Object? voucher;
+  final Object? voucher, attestation;
   try {
     final j = jsonDecode(handoff) as Map;
-    await keepAttestation(store, j['a']);
-    voucher = j['v'];
+    (voucher, attestation) = (j['v'], j['a']);
   } catch (_) {
     return 'malformed';
   }
+  await keepAttestation(store, attestation);
   final check = await checkPayment(jsonEncode(voucher), request);
   if (check.voucher == null) return check.reason;
   final v = check.voucher!, payer = signerOf(v);
@@ -147,10 +147,15 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                   // Said out loud: without a relayer key this build cannot tell a funded payer from an empty one.
                   if (relayerKey.isEmpty) const Text('The payer\'s balance was not checked: this build trusts no relayer'),
                 ]
-                else if (_rejection != null)
+                else if (_rejection != null) ...[
                   Text('Rejected: ${guardRefusals[_rejection] ?? _rejection}',
                       textAlign: TextAlign.center,
                       style: theme.textTheme.titleLarge?.copyWith(color: theme.colorScheme.error)),
+                  // Refusing cannot unsign the voucher: it pays this request and may still reach the chain.
+                  if (guardRefusals.containsKey(_rejection))
+                    const Text('The payment is validly signed. If it settles anyway, the money still reaches you.',
+                        textAlign: TextAlign.center),
+                ],
                 if (!_paid) ...[
                   const SizedBox(height: 16),
                   FilledButton.icon(

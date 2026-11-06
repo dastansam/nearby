@@ -83,13 +83,14 @@ class Gateway {
 
   /// Uploads every voucher without a final answer and records the relayer's: settled, or never
   /// going to. Vouchers it refuses for now (the payer's balance is short) are sent again next time.
-  /// Expired ones are asked about too: another phone may have settled them in time.
+  /// Expired ones are asked about too: another phone may have settled them in time. So are settled
+  /// ones whose block is not known yet: until it is, they count against the payer's balance.
   ///
   /// Throws if the relayer cannot be reached, which is the normal state of a phone with no signal.
   Future<void> sync() async {
     final pending = [
       for (final s in await _store.all())
-        if (s.outcome == null) s.voucher
+        if (s.outcome == null || (s.outcome == Outcome.settled && s.settledBlock == null)) s.voucher
     ];
     for (var i = 0; i < pending.length; i += _vouchersPerUpload) {
       final batch = pending.skip(i).take(_vouchersPerUpload).toList();
@@ -103,8 +104,7 @@ class Gateway {
       for (final (j, result) in results.indexed) {
         final outcome = const {'settled': Outcome.settled, 'invalid': Outcome.failed}[result['status']];
         if (outcome == null) continue;
-        await _store.setOutcome(batch[j], outcome,
-            tx: result['tx'] as String?, at: DateTime.tryParse(result['at'] as String? ?? ''));
+        await _store.setOutcome(batch[j], outcome, tx: result['tx'] as String?, block: result['block'] as int?);
       }
     }
   }
@@ -114,7 +114,10 @@ class Gateway {
   Future<void> refreshAttestation() async {
     final response = await _client.get(Uri.parse('$_base/attestation/$account')).timeout(const Duration(seconds: 30));
     if (response.statusCode != 200) throw StateError('relayer answered ${response.statusCode}');
-    await keepAttestation(_store, jsonDecode(response.body));
+    final signed = jsonDecode(response.body);
+    // Said out loud: a build with the wrong RELAYER_KEY would otherwise just never have a balance.
+    if (await readAttestation(signed) == null) throw StateError('its attestation is not signed by the key this build trusts');
+    await keepAttestation(_store, signed);
   }
 
   /// Often enough that a phone leaving coverage has most of the 24 h left; not on every upload.

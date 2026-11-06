@@ -9,13 +9,15 @@ import 'package:nearby/voucher/payment.dart';
 Future<String> publicKeyOf(SimpleKeyPair key) async => tag((await key.extractPublicKey()).bytes);
 
 /// What relayer/src/attestation.ts signs; testdata/attestation-vector.json pins the format.
-Future<Map<String, dynamic>> signAttestation(SimpleKeyPair relayer, String account, String balance, {DateTime? asOf}) async {
+Future<Map<String, dynamic>> signAttestation(SimpleKeyPair relayer, String account, String balance,
+    {DateTime? asOf, int block = 1000}) async {
   final payload = jsonEncode({
     'account': account,
     'token': usdcToken,
     'balance': balance,
     'bond': '0',
     'as_of': (asOf ?? DateTime.now()).toUtc().toIso8601String(),
+    'block': block,
   });
   final signature = await Ed25519().sign(utf8.encode('NearBy balance attestation v1\n$payload'), keyPair: relayer);
   return {'payload': payload, 'signature': tag(signature.bytes)};

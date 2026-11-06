@@ -128,14 +128,17 @@ void main() {
     expect((await upgraded.all()).single.tx, 'tx1');
   });
 
-  test('a settled voucher remembers when, and the first report stands', () async {
-    // The time decides whether an attested balance already includes this payment. A later,
-    // different report must not move it across that line.
-    final at = DateTime.utc(2026, 11, 10, 8, 30);
+  test('a settled voucher takes its block when the relayer learns it, and then keeps it', () async {
+    // The block decides whether an attested balance already includes this payment. It can arrive
+    // after the "settled" itself; once known, a later and different report must not move it.
     await store.put(voucher, VoucherKind.received);
-    await store.setOutcome(voucher, Outcome.settled, tx: 'tx1', at: at);
-    await store.setOutcome(voucher, Outcome.settled, at: at.add(const Duration(days: 1)));
-    expect((await store.from(signerOf(voucher))).single.settledAt, at);
+    await store.setOutcome(voucher, Outcome.settled, tx: 'tx1');
+    expect((await store.from(signerOf(voucher))).single.settledBlock, isNull);
+    await store.setOutcome(voucher, Outcome.settled, block: 5000);
+    await store.setOutcome(voucher, Outcome.settled, block: 9000);
+    await store.setOutcome(voucher, Outcome.failed, tx: 'other', block: 1);
+    final kept = (await store.from(signerOf(voucher))).single;
+    expect((kept.outcome, kept.tx, kept.settledBlock), (Outcome.settled, 'tx1', 5000));
   });
 
   test('finds every voucher of one payer and nobody else\'s', () async {
@@ -168,8 +171,8 @@ void main() {
 
     final upgraded = await VoucherStore.open(path);
     final kept = (await upgraded.all()).single;
-    // Settled at a time nobody recorded: the balance check has to treat it as possibly not yet counted.
-    expect((kept.outcome, kept.tx, kept.settledAt), (Outcome.settled, 'tx1', null));
+    // Settled in a block nobody recorded: the balance check has to treat it as possibly not yet counted.
+    expect((kept.outcome, kept.tx, kept.settledBlock), (Outcome.settled, 'tx1', null));
     await upgraded.saveAttestation('acct', DateTime.utc(2026, 11, 10), {'payload': 'p'});
     expect(await upgraded.attestation('acct'), {'payload': 'p'});
   });

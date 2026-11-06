@@ -24,9 +24,10 @@ void main() {
 
   setUp(() async {
     store = await VoucherStore.open(inMemoryDatabasePath);
-    // The in-memory database is shared between tests in this file.
+    // The in-memory database is shared between tests in this file: retire what earlier tests left,
+    // as settled in a known block, which is the one state a gateway never asks about again.
     for (final s in await store.all()) {
-      await store.setOutcome(s.voucher, Outcome.failed);
+      await store.setOutcome(s.voucher, Outcome.settled, block: 1);
     }
     uploads = [];
   });
@@ -64,10 +65,26 @@ void main() {
   test('a settled voucher is not uploaded again', () async {
     // Every upload costs the relayer chain lookups, and phones sync every half minute.
     await store.put(await voucher(), VoucherKind.sent);
-    final relayer = gateway((_) => {'status': 'settled', 'tx': 'tx1'});
+    final relayer = gateway((_) => {'status': 'settled', 'tx': 'tx1', 'block': 5000});
     await relayer.sync();
     await relayer.sync();
     expect(uploads.length, 1);
+  });
+
+  test('a settled voucher is asked about again until the relayer knows its block', () async {
+    // Until then a payee cannot tell whether the payer's attested balance already includes it, and
+    // has to count it against them. Left that way, an honest payer is short by that amount for good.
+    final v = await voucher();
+    await store.put(v, VoucherKind.received);
+    Map<String, dynamic> answer = {'status': 'settled', 'tx': 'tx1'};
+    final relayer = gateway((_) => answer);
+    await relayer.sync();
+    expect(((await stored(v)).outcome, (await stored(v)).settledBlock), (Outcome.settled, null));
+    answer = {'status': 'settled', 'block': 5000};
+    await relayer.sync();
+    await relayer.sync();
+    expect(uploads, [[v], [v]]);
+    expect(((await stored(v)).tx, (await stored(v)).settledBlock), ('tx1', 5000));
   });
 
   test('a voucher the relayer could not settle yet stays pending and is sent again', () async {
@@ -151,7 +168,7 @@ void main() {
     final first = Completer<void>(), second = Completer<void>();
     final relayer = gateway((v) {
       (first.isCompleted ? second : first).complete();
-      return {'status': 'settled', 'tx': 'tx1'};
+      return {'status': 'settled', 'tx': 'tx1', 'block': 5000};
     });
     addTearDown(relayer.stop);
     await store.put(await voucher(), VoucherKind.relayed, hops: 1);
@@ -165,13 +182,6 @@ void main() {
     expect(uploads.last, [arrived]);
   });
 
-  test('records when the relayer says a payment settled', () async {
-    // A payee later compares this with the time of the payer's attested balance, both by the relayer's clock.
-    final v = await voucher();
-    await store.put(v, VoucherKind.received);
-    await gateway((_) => {'status': 'settled', 'tx': 'tx1', 'at': '2026-11-10T08:30:00.000Z'}).sync();
-    expect((await stored(v)).settledAt, DateTime.utc(2026, 11, 10, 8, 30));
-  });
 
   group('the balance attestation', () {
     const account = 'payer.near';
@@ -211,6 +221,17 @@ void main() {
       await attempt();
       expect(fetched, ['https://relayer.test/attestation/$account']);
       expect((await attestationFor(mine, account))!.balance, BigInt.from(5000000));
+    });
+
+    test('signed by a key this build does not trust is reported, not quietly dropped', () async {
+      // A build with a mistyped RELAYER_KEY would otherwise say "go online" forever, with nothing to explain it.
+      relayerKey = await publicKeyOf(await Ed25519().newKeyPair());
+      final other = await Ed25519().newKeyPair();
+      final g = Gateway(mine, 'https://relayer.test',
+          account: account,
+          client: MockClient((_) async => http.Response(jsonEncode(await signAttestation(other, account, '5000000')), 200)));
+      await expectLater(g.refreshAttestation(), throwsStateError);
+      expect(await mine.attestation(account), isNull);
     });
 
     test('is not fetched by a build that trusts no relayer, which could not check it', () async {
