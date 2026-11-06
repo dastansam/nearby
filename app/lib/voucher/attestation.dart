@@ -17,7 +17,7 @@ String relayerKey = const String.fromEnvironment('RELAYER_KEY');
 /// A payee stops trusting an attestation this long after the relayer read the balance.
 const attestationLifetime = Duration(hours: 24);
 
-/// Must match ATTESTATION_DOMAIN in relayer/src/attestation.ts.
+/// Must match ATTESTATION_DOMAIN in relayer/src/attestation.rs.
 const _domain = 'NearBy balance attestation v1\n';
 
 /// [asOf] is the relayer's clock, for how long the statement is good. [block] is the height the

@@ -8,7 +8,7 @@ import 'package:nearby/voucher/payment.dart';
 /// [key]'s public half, in the form the app is built with (RELAYER_KEY).
 Future<String> publicKeyOf(SimpleKeyPair key) async => tag((await key.extractPublicKey()).bytes);
 
-/// What relayer/src/attestation.ts signs; testdata/attestation-vector.json pins the format.
+/// What relayer/src/attestation.rs signs; testdata/attestation-vector.json pins the format.
 Future<Map<String, dynamic>> signAttestation(SimpleKeyPair relayer, String account, String balance,
     {DateTime? asOf, int block = 1000}) async {
   final payload = jsonEncode({

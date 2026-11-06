@@ -32,7 +32,7 @@ void main() {
     uploads = [];
   });
 
-  /// A relayer that answers each voucher with [answer] (the shape relayer/src/settle.ts returns).
+  /// A relayer that answers each voucher with [answer] (the shape relayer/src/settle.rs returns).
   Gateway gateway(Map<String, dynamic> Function(Map<String, dynamic> voucher) answer) => Gateway(
       store,
       'https://relayer.test',

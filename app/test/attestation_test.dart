@@ -10,7 +10,7 @@ void main() {
   sqfliteFfiInit();
   databaseFactory = databaseFactoryFfi;
 
-  // Produced by relayer/src/attestation.ts, which is pinned to the same file. If this stops
+  // Produced by relayer/src/attestation.rs, which is pinned to the same file. If this stops
   // verifying, phones no longer trust what the relayer signs and refuse every payment.
   final vector = jsonDecode(File('../testdata/attestation-vector.json').readAsStringSync()) as Map<String, dynamic>;
   final signed = vector['signed'] as Map<String, dynamic>;

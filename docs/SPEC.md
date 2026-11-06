@@ -8,6 +8,8 @@ Local copy of the living spec at https://claude.ai/artifact/WL5vbTkHi7PiMb4KZXe9
 
 **This file is newer on the balance attestation (2026-11-06).** It also carries `block`, the height the balance was read at, and the relayer reports the block by which each voucher settled. A payee subtracts a voucher it has seen unless it settled by the attestation's block. Clock times cannot decide that: the balance and the settlement may come from RPC nodes a block apart.
 
+**This file is newer on the relayer's language (2026-11-06).** The relayer is written in Rust (axum, plain JSON-RPC to NEAR), not TypeScript. Its HTTP API and signed formats are unchanged.
+
 We ship a Flutter app that pays with no internet. The payer signs a NEAR transfer on the phone, nearby phones relay it hop by hop over Bluetooth, and the first phone with a signal settles it on NEAR. Deadline: Nov 14, 23:59 UTC, 9 days from today.
 
 ## Overview
@@ -124,7 +126,7 @@ The mesh is our own: a gossip layer of about 300 lines of Dart on top of Android
 | Hand-off fallback | QR (mobile_scanner + qr_flutter) | Works with every radio off |
 | Signing | `cryptography` (Ed25519), `crypto` (SHA-256), base58 | NEP-413; byte-identical to the TS reference (tested) |
 | Local store | sqflite | Outbox, seen vouchers, receipts, attestation |
-| Relayer | TypeScript + near-api-js, Fastify | `execute_intents`, balance attestations, equivocation detection |
+| Relayer | Rust, axum | `execute_intents`, balance attestations, equivocation detection |
 | Settlement | `intents.near`, mainnet only ([no testnet](https://docs.near-intents.org/integration/verifier-contract/introduction)) | Transfer intents; deposits via `ft_transfer_call` |
 | Bond contract | Rust, near-sdk | Bonds, equivocation proofs, slashing, key bans |
 | License | MIT | Rules accept any license (Q-014) |
@@ -146,7 +148,7 @@ Prove settlement by Nov 6, submit Nov 14 with 12 h spare. Build plan by day, 202
 | Nov 13 | Demo video, README, APK |
 | Nov 14 | **Submit (12:00 UTC)** |
 
-Gate 1 comes first: a voucher signed on a phone in airplane mode, submitted later, has to settle on `intents.near`. The salt half of this gate is answered (plain nonces carry none); what remains is one funded run of `npm run settle-test`, signed now and submitted a day later. If that fails, settlement moves into our bond contract the same day. If the gossip layer isn't reliable by the end of Nov 9, the demo ships single-hop plus QR and multi-hop moves to the roadmap column. The bond contract takes Nov 12.
+Gate 1 comes first: a voucher signed on a phone in airplane mode, submitted later, has to settle on `intents.near`. The salt half of this gate is answered (plain nonces carry none); what remains is one funded run of `cargo run --bin settle-test`, signed now and submitted a day later. If that fails, settlement moves into our bond contract the same day. If the gossip layer isn't reliable by the end of Nov 9, the demo ships single-hop plus QR and multi-hop moves to the roadmap column. The bond contract takes Nov 12.
 
 ## Demo script and submission checklist
 
@@ -178,7 +180,7 @@ The video is 2 minutes, filmed with three phones: Payer (A), Merchant (B) and Ga
 | --- | --- | --- |
 | ~~The nonce's salt goes stale~~ Resolved 2026-11-06: plain nonces carry no salt (mainnet accepts one with a bogus salt prefix). For versioned nonces, old salts stay valid until the contract's DAO or salt manager invalidates them; there is no time-based expiry | Low: a contract upgrade could stop accepting plain nonces | Switch the signers to the versioned layout and cache `current_salt` at top-up |
 | ~~`deadline` enforcement isn't documented~~ Confirmed 2026-11-06: mainnet rejects a past deadline ("deadline has expired") and a deadline without a time zone | None | — |
-| No voucher has settled yet: checks so far are `simulate_intents` with an unfunded key | High until done | `npm run settle-test` with a funded offline account, signed now and submitted a day later. If it fails → settle through the bond contract |
+| No voucher has settled yet: checks so far are `simulate_intents` with an unfunded key | High until done | `cargo run --bin settle-test` with a funded offline account, signed now and submitted a day later. If it fails → settle through the bond contract |
 | Nearby Connections drops links or rediscovers slowly | Medium | Single hop plus QR; record the demo in a quiet RF space |
 | Bond contract slips past Nov 12 | Medium: weakens the double-spend story | Demo the offline proof (layer 2) and show the contract in tests |
 | README claims more than runs | High: fails AI screening | Update the works/next table on the last day against the APK |

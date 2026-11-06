@@ -1,5 +1,5 @@
 // NEP-413 signed transfer intents ("vouchers") for intents.near.
-// Must produce byte-identical hashes to relayer/src/voucher.ts.
+// Must produce byte-identical hashes to relayer/src/voucher.rs.
 import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';

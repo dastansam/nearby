@@ -6,9 +6,8 @@ app/.packages
 *.iml
 .idea/
 
-# Node
-relayer/node_modules/
-relayer/dist/
+# Rust
+relayer/target/
 relayer/.env
 
 # Keys, and signed vouchers: anyone holding one can submit it

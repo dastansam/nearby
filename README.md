@@ -14,11 +14,10 @@ Offline payments relayed phone-to-phone over Bluetooth and Wi-Fi ([Nearby Connec
 
 ## Run it
 
-Relayer (Node 22+), from `relayer/`:
+Relayer (Rust 1.85+), from `relayer/`:
 
 ```sh
-npm install
-RELAYER_ACCOUNT=you.near RELAYER_KEY=ed25519:... ATTESTATION_SK=<64 hex chars> npm run dev
+RELAYER_ACCOUNT=you.near RELAYER_KEY=ed25519:... ATTESTATION_SK=<64 hex chars> cargo run --release
 ```
 
 `RELAYER_ACCOUNT` is a mainnet account with NEAR for gas. It only pays gas: a voucher's own signature moves the tokens. `GET /` prints the attestation key.
@@ -33,17 +32,17 @@ flutter build apk --debug \
 
 Debug builds may use plain `http`; release builds need `https`. Without `RELAYER_URL` the app still pays, receives and relays, but never uploads. Without `RELAYER_KEY` there is no relayer whose balance attestations the app trusts, so payees skip the balance check (the receive screen says so) and enforce only the 25 USDC limit and the sequence numbers.
 
-Tests: `npm test` in `relayer/`, `flutter test` in `app/`.
+Tests: `cargo test` in `relayer/`, `flutter test` in `app/`.
 
 ## Layout
 
 | Path | What |
 | --- | --- |
 | `app/` | Flutter app (Android): offline wallet, voucher signing/verification, QR pay and receive, phone-to-phone relay, upload to the relayer |
-| `relayer/` | TypeScript service: receives vouchers, calls `execute_intents`, signs balance attestations, keeps pairs of vouchers that prove a double-spend |
-| `relayer/scripts/settle-test.ts` | Gate 1: sign a voucher now, submit it later, see whether it settles |
+| `relayer/` | Rust service: receives vouchers, calls `execute_intents`, signs balance attestations, keeps pairs of vouchers that prove a double-spend |
+| `relayer/src/bin/settle-test.rs` | Gate 1: sign a voucher now, submit it later, see whether it settles (`cargo run --bin settle-test -- sign`, then `submit`) |
 | `docs/` | Spec and threat model |
-| `testdata/` | Voucher and balance attestation test vectors shared by the Dart and TypeScript code |
+| `testdata/` | Voucher and balance attestation test vectors shared by the Dart and Rust code |
 
 ## Status
 
