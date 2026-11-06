@@ -10,7 +10,11 @@ import 'voucher/nep413.dart';
 /// and are only carried toward the internet.
 enum VoucherKind { sent, received, relayed }
 
-typedef StoredVoucher = ({VoucherKind kind, int hops, Map<String, dynamic> voucher});
+/// [settled] is what the relayer reported; [tx] is the settling transaction when it knew it.
+typedef StoredVoucher = ({VoucherKind kind, int hops, Map<String, dynamic> voucher, bool settled, String? tx});
+
+/// Whether a stored voucher can still settle: it has not already, and its deadline has not passed.
+bool canSettle(StoredVoucher s, DateTime now) => !s.settled && voucherDeadline(s.voucher).isAfter(now);
 
 class VoucherStore {
   final Database _db;
@@ -18,15 +22,22 @@ class VoucherStore {
   final _puts = StreamController<StoredVoucher>.broadcast(sync: true);
   VoucherStore._(this._db);
 
-  static const _schema = 'CREATE TABLE vouchers (key TEXT PRIMARY KEY, kind TEXT NOT NULL, '
-      'hops INTEGER NOT NULL, json TEXT NOT NULL, created_at INTEGER NOT NULL)';
+  static const _settledColumns = ['settled INTEGER NOT NULL DEFAULT 0', 'tx TEXT'];
+  static final _schema = 'CREATE TABLE vouchers (key TEXT PRIMARY KEY, kind TEXT NOT NULL, '
+      'hops INTEGER NOT NULL, json TEXT NOT NULL, created_at INTEGER NOT NULL, ${_settledColumns.join(', ')})';
 
   static Future<VoucherStore> open([String path = 'nearby.db']) async => VoucherStore._(await openDatabase(path,
-      version: 2,
+      version: 3,
       onCreate: (db, _) => db.execute(_schema),
-      // Version 1 held only this phone's own payments, keyed by nonce. They are still unsettled
-      // claims on money, so they are carried over rather than dropped.
-      onUpgrade: (db, _, __) async {
+      onUpgrade: (db, from, _) async {
+        if (from == 2) {
+          for (final column in _settledColumns) {
+            await db.execute('ALTER TABLE vouchers ADD COLUMN $column');
+          }
+          return;
+        }
+        // Version 1 held only this phone's own payments, keyed by nonce. They are still unsettled
+        // claims on money, so they are carried over rather than dropped.
         final old = await db.query('vouchers');
         await db.execute('DROP TABLE vouchers');
         await db.execute(_schema);
@@ -71,9 +82,14 @@ class VoucherStore {
       if (claim) await txn.update('vouchers', {'kind': kind.name}, where: 'key = ?', whereArgs: [key]);
       return claim ? held.single['hops'] as int : null;
     });
-    if (storedHops != null) _puts.add((kind: kind, hops: storedHops, voucher: voucher));
+    if (storedHops != null) _puts.add((kind: kind, hops: storedHops, voucher: voucher, settled: false, tx: null));
     return storedHops != null;
   }
+
+  /// Records that the relayer reported [voucher] settled, in [tx] if it knew. The row stays, so the
+  /// mesh still counts the voucher as held and does not fetch it again.
+  Future<void> markSettled(Map<String, dynamic> voucher, String? tx) => _db.rawUpdate(
+      'UPDATE vouchers SET settled = 1, tx = COALESCE(?, tx) WHERE key = ?', [tx, voucherKey(voucher)]);
 
   Future<Set<String>> keys() async => {for (final r in await _db.query('vouchers', columns: ['key'])) r['key'] as String};
 
@@ -84,6 +100,8 @@ class VoucherStore {
             kind: VoucherKind.values.byName(r['kind'] as String),
             hops: r['hops'] as int,
             voucher: jsonDecode(r['json'] as String) as Map<String, dynamic>,
+            settled: r['settled'] == 1,
+            tx: r['tx'] as String?,
           )
       ];
 }

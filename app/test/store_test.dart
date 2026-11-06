@@ -97,6 +97,36 @@ void main() {
     expect(await upgraded.put(voucher, VoucherKind.received), isFalse, reason: 'and it still cannot be accepted twice');
   });
 
+  test('a voucher marked settled keeps its transaction and its place in the store', () async {
+    await store.put(voucher, VoucherKind.received);
+    await store.markSettled(voucher, 'tx1');
+    // A later report without the hash (another relayer settled it) must not lose the link we had.
+    await store.markSettled(voucher, null);
+
+    final stored = (await store.all()).singleWhere((s) => voucherKey(s.voucher) == voucherKey(voucher));
+    expect((stored.settled, stored.tx), (true, 'tx1'));
+    expect(await store.put(voucher, VoucherKind.received), isFalse, reason: 'settled is still not a new payment');
+  });
+
+  test('payments stored before settlement was tracked survive the upgrade, as unsettled', () async {
+    final dir = Directory.systemTemp.createTempSync('nearby_store_');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final path = '${dir.path}/v2.db';
+    final old = await openDatabase(path,
+        version: 2,
+        onCreate: (db, _) => db.execute('CREATE TABLE vouchers (key TEXT PRIMARY KEY, kind TEXT NOT NULL, '
+            'hops INTEGER NOT NULL, json TEXT NOT NULL, created_at INTEGER NOT NULL)'));
+    await old.insert('vouchers',
+        {'key': voucherKey(voucher), 'kind': 'received', 'hops': 0, 'json': jsonEncode(voucher), 'created_at': 1});
+    await old.close();
+
+    final upgraded = await VoucherStore.open(path);
+    final kept = (await upgraded.all()).single;
+    expect((kept.kind, kept.settled, kept.tx), (VoucherKind.received, false, null));
+    await upgraded.markSettled(voucher, 'tx1');
+    expect((await upgraded.all()).single.tx, 'tx1');
+  });
+
   test('lists what was stored', () async {
     await store.put(voucher, VoucherKind.sent);
     final stored = (await store.all()).singleWhere((s) => voucherKey(s.voucher) == voucherKey(voucher));

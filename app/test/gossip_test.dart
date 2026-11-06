@@ -161,6 +161,21 @@ void main() {
     expect(air.sent('voucher').map((m) => m['v']), [second]);
   });
 
+  test('a voucher that has settled is no longer passed on', () async {
+    // It has done its job; carrying it further only spends other phones' radio time and storage.
+    final gateway = await phone('gateway'), late = await phone('late');
+    final settled = await payment(), pending = await payment();
+    await gateway.store.put(settled, VoucherKind.relayed, hops: 1);
+    await gateway.store.put(pending, VoucherKind.relayed, hops: 1);
+    await gateway.store.markSettled(settled, 'tx1');
+
+    air.link(gateway, late);
+    await air.settle();
+
+    expect(await late.holds(pending), isTrue);
+    expect(await late.holds(settled), isFalse);
+  });
+
   test('a voucher stops being passed on at the hop limit', () async {
     // Bounds how far anything, including junk signed by a throwaway key, can spread.
     final line = [for (var i = 0; i <= maxHops + 1; i++) await phone('p$i')];

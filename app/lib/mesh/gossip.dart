@@ -75,12 +75,12 @@ class Gossip {
   Future<void> _enqueue(Future<void> Function() task) =>
       _queue = _queue.then((_) => task()).catchError((Object e) => debugPrint('gossip: $e'));
 
-  /// Vouchers worth passing on, by gossip id: not expired and not at the hop limit.
+  /// Vouchers worth passing on, by gossip id: not settled, not expired and not at the hop limit.
   Future<Map<String, StoredVoucher>> _forwardable() async {
     final now = DateTime.now();
     return {
       for (final s in await _store.all())
-        if (s.hops < maxHops && voucherDeadline(s.voucher).isAfter(now)) gossipId(voucherKey(s.voucher)): s
+        if (canSettle(s, now) && s.hops < maxHops) gossipId(voucherKey(s.voucher)): s
     };
   }
 

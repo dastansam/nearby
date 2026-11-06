@@ -1,7 +1,9 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
+import 'gateway.dart';
 import 'mesh/gossip.dart';
 import 'mesh/nearby_transport.dart';
 import 'screens/pay.dart';
@@ -39,6 +41,8 @@ class _HomeScreenState extends State<HomeScreen> {
   StreamSubscription<void>? _puts;
   Timer? _reload;
   int _carried = 0;
+  Gateway? _gateway;
+  int _waiting = 0; // vouchers on this phone, its own or carried, not yet known to be settled
   Object? _meshError;
   bool _busy = false; // a Pay or Receive flow is open; a second tap must not start another
 
@@ -53,6 +57,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _gossip?.stop();
     _puts?.cancel();
     _reload?.cancel();
+    _gateway?.stop();
     super.dispose();
   }
 
@@ -73,6 +78,7 @@ class _HomeScreenState extends State<HomeScreen> {
           _reload = null;
           _reloadVouchers();
         }));
+    if (relayerUrl.isNotEmpty) _gateway = Gateway(_store, relayerUrl, onChange: _reloadVouchers)..start();
     final gossip = Gossip(NearbyTransport(), _store, onChange: () {
       if (mounted) setState(() {});
     });
@@ -100,13 +106,20 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  Future<void> _copyTx(String tx) async {
+    final messenger = ScaffoldMessenger.of(context);
+    await Clipboard.setData(ClipboardData(text: 'https://nearblocks.io/txns/$tx'));
+    messenger.showSnackBar(const SnackBar(content: Text('Transaction link copied')));
+  }
+
   Future<void> _reloadVouchers() async {
-    final all = await _store.all();
+    final all = await _store.all(), now = DateTime.now();
     if (!mounted) return;
     // Only this phone's own payments are listed; carried ones would bury them, so they are just counted.
     setState(() {
       _vouchers = all.where((v) => v.kind != VoucherKind.relayed).toList();
-      _carried = all.length - _vouchers.length;
+      _carried = all.where((v) => v.kind == VoucherKind.relayed && canSettle(v, now)).length;
+      _waiting = all.where((v) => canSettle(v, now)).length;
     });
   }
 
@@ -139,6 +152,17 @@ class _HomeScreenState extends State<HomeScreen> {
               ? (_meshError == null ? 'Starting' : 'QR payments still work. $_meshError')
               : 'Carrying $_carried payments toward the internet'),
         ),
+        ListTile(
+          leading: const Icon(Icons.cloud_outlined),
+          title: Text(_gateway == null
+              ? 'No relayer in this build'
+              : _gateway!.online
+                  ? 'Online: settling payments'
+                  : 'No signal'),
+          subtitle: Text(_gateway == null
+              ? 'Payments are signed and relayed, and settle from a phone that has one'
+              : '$_waiting payments waiting to settle'),
+        ),
         Padding(
           padding: const EdgeInsets.all(16),
           child: Row(children: [
@@ -167,12 +191,18 @@ class _HomeScreenState extends State<HomeScreen> {
               return ListTile(
                 leading: Icon(sent ? Icons.arrow_upward : Icons.arrow_downward),
                 title: Text('${sent ? 'Sent' : 'Received'} ${formatUsdc(amountOf(v.voucher))}'),
-                subtitle: Text(sent ? 'Pending settlement · tap to show the QR again' : 'Pending settlement'),
-                // Re-showing beats re-signing: a second voucher for one purchase would settle twice.
-                onTap: sent
-                    ? () => Navigator.push(
-                        context, MaterialPageRoute(builder: (_) => VoucherScreen(voucher: v.voucher)))
-                    : null,
+                subtitle: Text(v.settled
+                    ? (v.tx == null ? 'Settled' : 'Settled · tap to copy the transaction link')
+                    : !canSettle(v, DateTime.now())
+                        ? 'Expired before it settled'
+                        : (sent ? 'Pending settlement · tap to show the QR again' : 'Pending settlement')),
+                onTap: v.settled
+                    ? (v.tx == null ? null : () => _copyTx(v.tx!))
+                    // Re-showing beats re-signing: a second voucher for one purchase would settle twice.
+                    : sent
+                        ? () => Navigator.push(
+                            context, MaterialPageRoute(builder: (_) => VoucherScreen(voucher: v.voucher)))
+                        : null,
               );
             },
           ),

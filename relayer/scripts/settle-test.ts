@@ -6,10 +6,8 @@
 //               account with NEAR for gas). It pays gas only; the voucher's signature moves the tokens.
 import { readFileSync, writeFileSync } from "node:fs";
 import { ed25519 } from "@noble/curves/ed25519";
-import { connect, KeyPair, keyStores } from "near-api-js";
-import { implicitAccount, makeNonce, signVoucher, VERIFYING_CONTRACT, type SignedVoucher } from "../src/voucher.ts";
-
-const RPC = process.env.NEAR_RPC ?? "https://rpc.mainnet.near.org";
+import { nearChain } from "../src/chain.ts";
+import { implicitAccount, makeNonce, signVoucher, type SignedVoucher } from "../src/voucher.ts";
 
 const mode = process.argv[2];
 if (mode === "sign") {
@@ -30,14 +28,12 @@ if (mode === "sign") {
   console.log("signed at", signedAt);
   const accountId = process.env.RELAYER_ACCOUNT, key = process.env.RELAYER_KEY;
   if (!accountId || !key) throw new Error("set RELAYER_ACCOUNT and RELAYER_KEY");
-  const keyStore = new keyStores.InMemoryKeyStore();
-  await keyStore.setKey("mainnet", accountId, KeyPair.fromString(key as Parameters<typeof KeyPair.fromString>[0]));
-  const account = await (await connect({ networkId: "mainnet", nodeUrl: RPC, keyStore })).account(accountId);
-  const call = { contractId: VERIFYING_CONTRACT, args: { signed: [v] } };
+  // The same code path the relayer settles with.
+  const chain = await nearChain({ accountId, key, rpc: process.env.NEAR_RPC });
   // simulate_intents is a view: it throws on a bad signature, nonce, deadline or balance before we spend gas.
-  console.log("simulated:", JSON.stringify(await account.viewFunction({ ...call, methodName: "simulate_intents" })));
-  const outcome = await account.functionCall({ ...call, methodName: "execute_intents", gas: 300_000_000_000_000n });
-  console.log("settled: https://nearblocks.io/txns/" + outcome.transaction.hash);
+  await chain.simulate(v);
+  console.log("simulated: ok");
+  console.log("settled: https://nearblocks.io/txns/" + (await chain.execute(v)));
 } else {
   console.log("usage: settle-test sign|submit");
 }
