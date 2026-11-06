@@ -13,11 +13,13 @@ class FakeChain implements Chain {
   used = new Set<string>(); // "account:nonce" already settled on chain
   refuse = new Map<string, string>(); // nonce -> the contract's panic message
   down = false;
+  lookups = 0; // view calls made
   executed: SignedVoucher[] = [];
   balance = "25000000";
 
   private reach() {
     if (this.down) throw new Error("fetch failed");
+    this.lookups++;
   }
   async balanceOf() {
     this.reach();
@@ -41,7 +43,7 @@ class FakeChain implements Chain {
 
 const sk = ed25519.utils.randomPrivateKey();
 const signer = implicitAccount(ed25519.getPublicKey(sk));
-const pay = (o: { to?: string; memo?: string; intents?: object[]; key?: Uint8Array; validForHours?: number } = {}) => {
+const pay = (o: { to?: string; memo?: string; intents?: object[]; key?: Uint8Array; validForHours?: number; nonce?: Uint8Array } = {}) => {
   const key = o.key ?? sk;
   return signVoucher(key, {
     signer_id: implicitAccount(ed25519.getPublicKey(key)),
@@ -50,7 +52,7 @@ const pay = (o: { to?: string; memo?: string; intents?: object[]; key?: Uint8Arr
       intent: "transfer", receiver_id: o.to ?? "merchant.near", tokens: { [USDC_TOKEN]: "2500000" },
       ...(o.memo ? { memo: o.memo } : {}),
     }]) as never,
-  }, makeNonce());
+  }, o.nonce ?? makeNonce());
 };
 
 test("settles an uploaded voucher and says where", async () => {
@@ -75,6 +77,36 @@ test("a voucher already on chain is reported settled without paying gas again", 
   chain.used.add(`${signer}:${v.payload.nonce}`);
   assert.deepEqual(await new Settler(chain).settle([v]), [{ status: "settled" }]);
   assert.equal(chain.executed.length, 0);
+});
+
+// The chain settles one voucher per signer and nonce. A payer who signs two on one nonce pays
+// only one merchant; telling the other "settled", with the first one's transaction, would hide the theft.
+test("a second voucher on a spent nonce is not reported as settled", async () => {
+  const chain = new FakeChain(), settler = new Settler(chain), nonce = makeNonce();
+  const paid = pay({ to: "merchant.near", nonce }), cheated = pay({ to: "other.near", nonce });
+  assert.deepEqual(await settler.settle([paid, cheated, paid]), [
+    { status: "settled", tx: "tx1" },
+    { status: "invalid", reason: "nonce spent by another voucher" },
+    { status: "settled", tx: "tx1" },
+  ]);
+  assert.deepEqual(chain.executed, [paid]);
+});
+
+test("a voucher that settled before it expired is still reported settled afterwards", async () => {
+  // A payee whose phone comes back online days later must learn it was paid, not see "expired".
+  const chain = new FakeChain(), v = pay({ validForHours: -1 });
+  chain.used.add(`${signer}:${v.payload.nonce}`);
+  assert.deepEqual(await new Settler(chain).settle([v]), [{ status: "settled" }]);
+  assert.equal(chain.executed.length, 0);
+});
+
+test("a refused voucher uploaded again straight away is answered without asking the chain", async () => {
+  // Every phone that carries it re-uploads it every half minute; the answer will not have changed.
+  const chain = new FakeChain(), settler = new Settler(chain), broke = pay();
+  chain.refuse.set(broke.payload.nonce, "insufficient balance or overflow");
+  const first = await settler.settle([broke]), asked = chain.lookups;
+  assert.deepEqual(await settler.settle([broke]), first);
+  assert.equal(chain.lookups, asked);
 });
 
 test("a voucher the contract would refuse costs no gas, and does not hold up the others", async () => {
@@ -105,10 +137,12 @@ test("what is not a NearBy payment never reaches the chain", async () => {
     tampered,
     pay({ intents: [transfer, transfer] }),
     pay({ intents: [{ intent: "ft_withdraw", token: "usdc.near", receiver_id: "a.near", amount: "1" }] }),
+    pay({ intents: [{ intent: "transfer", receiver_id: "a.near", tokens: { "nep141:wrap.near": "1" } }] }),
     { hello: "world" },
     null,
   ]);
-  assert.deepEqual(results.map((r) => r.status === "invalid" && r.reason), ["signature", "intents", "intents", "malformed", "malformed"]);
+  assert.deepEqual(results.map((r) => r.status === "invalid" && r.reason),
+    ["signature", "intents", "intents", "intents", "malformed", "malformed"]);
   assert.equal(chain.executed.length, 0);
 });
 
@@ -147,6 +181,22 @@ test("a long upload does not make a short one wait for all of it", async () => {
   const long = [pay(), pay(), pay(), pay()], short = pay();
   await Promise.all([settler.settle(long), settler.settle([short])]);
   assert.ok(chain.executed.indexOf(short) < 3, `the short upload was served at position ${chain.executed.indexOf(short)}`);
+});
+
+test("a pair that reuses the nonce as well as the sequence number is still proof", async () => {
+  const settler = new Settler(new FakeChain()), nonce = makeNonce();
+  const first = pay({ memo: "seq:4 prev:00", nonce }), second = pay({ to: "other.near", memo: "seq:4 prev:00", nonce });
+  await settler.settle([first, second]);
+  assert.deepEqual(settler.equivocations, [[first, second]]);
+});
+
+test("someone else's pair cannot make a real proof look already recorded", async () => {
+  // Nonces are public once a voucher is gossiped; a cheat could plant a pair that reuses theirs.
+  const settler = new Settler(new FakeChain()), nonce = makeNonce(), throwaway = ed25519.utils.randomPrivateKey();
+  await settler.settle([pay({ memo: "seq:1 prev:00", key: throwaway }), pay({ memo: "seq:1 prev:00", key: throwaway, nonce })]);
+  const first = pay({ memo: "seq:4 prev:00" }), second = pay({ to: "other.near", memo: "seq:4 prev:00", nonce });
+  await settler.settle([first, second]);
+  assert.deepEqual(settler.equivocations[1], [first, second]);
 });
 
 test("the same sequence number from two different payers is not a double-spend", async () => {

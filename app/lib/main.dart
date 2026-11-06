@@ -156,9 +156,7 @@ class _HomeScreenState extends State<HomeScreen> {
           leading: const Icon(Icons.cloud_outlined),
           title: Text(_gateway == null
               ? 'No relayer in this build'
-              : _gateway!.online
-                  ? 'Online: settling payments'
-                  : 'No signal'),
+              : _gateway!.problem ?? 'Online: settling payments'),
           subtitle: Text(_gateway == null
               ? 'Payments are signed and relayed, and settle from a phone that has one'
               : '$_waiting payments waiting to settle'),
@@ -187,19 +185,21 @@ class _HomeScreenState extends State<HomeScreen> {
             itemCount: _vouchers.length,
             itemBuilder: (context, i) {
               final v = _vouchers[i];
-              final sent = v.kind == VoucherKind.sent;
+              final sent = v.kind == VoucherKind.sent, pending = canSettle(v, DateTime.now());
               return ListTile(
                 leading: Icon(sent ? Icons.arrow_upward : Icons.arrow_downward),
                 title: Text('${sent ? 'Sent' : 'Received'} ${formatUsdc(amountOf(v.voucher))}'),
-                subtitle: Text(v.settled
-                    ? (v.tx == null ? 'Settled' : 'Settled · tap to copy the transaction link')
-                    : !canSettle(v, DateTime.now())
-                        ? 'Expired before it settled'
-                        : (sent ? 'Pending settlement · tap to show the QR again' : 'Pending settlement')),
-                onTap: v.settled
-                    ? (v.tx == null ? null : () => _copyTx(v.tx!))
+                subtitle: Text(switch (v.outcome) {
+                  Outcome.settled => v.tx == null ? 'Settled' : 'Settled · tap to copy the transaction link',
+                  Outcome.failed => 'Did not settle',
+                  // Another phone may have settled it in time; only the relayer can say.
+                  null when !pending => 'Expired · not known to have settled',
+                  null => sent ? 'Pending settlement · tap to show the QR again' : 'Pending settlement',
+                }),
+                onTap: v.tx != null
+                    ? () => _copyTx(v.tx!)
                     // Re-showing beats re-signing: a second voucher for one purchase would settle twice.
-                    : sent
+                    : sent && pending
                         ? () => Navigator.push(
                             context, MaterialPageRoute(builder: (_) => VoucherScreen(voucher: v.voucher)))
                         : null,

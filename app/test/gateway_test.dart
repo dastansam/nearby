@@ -22,7 +22,7 @@ void main() {
     store = await VoucherStore.open(inMemoryDatabasePath);
     // The in-memory database is shared between tests in this file.
     for (final s in await store.all()) {
-      await store.markSettled(s.voucher, null);
+      await store.setOutcome(s.voucher, Outcome.failed);
     }
     uploads = [];
   });
@@ -54,7 +54,7 @@ void main() {
 
     expect(uploads.single, unorderedEquals([mine, carried]), reason: 'exactly what was signed, or it cannot settle');
     expect((await stored(mine)).tx, 'tx-${mine['payload']['nonce']}');
-    expect((await stored(carried)).settled, isTrue);
+    expect((await stored(carried)).outcome, Outcome.settled);
   });
 
   test('a settled voucher is not uploaded again', () async {
@@ -79,18 +79,58 @@ void main() {
     final relayer = gateway((v) => answers[v['signature']]!);
 
     await relayer.sync();
-    expect([(await stored(short)).settled, (await stored(unlucky)).settled], [false, false]);
+    expect([(await stored(short)).outcome, (await stored(unlucky)).outcome], [null, null]);
 
     answers = {for (final s in answers.keys) s: {'status': 'settled', 'tx': 'tx9'}};
     await relayer.sync();
     expect([(await stored(short)).tx, (await stored(unlucky)).tx], ['tx9', 'tx9']);
   });
 
-  test('an expired voucher is not uploaded', () async {
-    // The contract refuses it for good, so sending it only wastes the signal.
-    await store.put(await voucher(validFor: const Duration(seconds: -5)), VoucherKind.received);
+  test('an expired voucher is still asked about, because another phone may have settled it in time', () async {
+    // Otherwise a payee who was offline past the deadline would see "expired" for money they received.
+    final v = await voucher(validFor: const Duration(seconds: -5));
+    await store.put(v, VoucherKind.received);
     await gateway((_) => {'status': 'settled'}).sync();
-    expect(uploads, isEmpty);
+    expect((await stored(v)).outcome, Outcome.settled);
+  });
+
+  test('a voucher the relayer says will never settle is not sent again', () async {
+    // "invalid" is final (expired unsettled, or its nonce went to another voucher). Without this,
+    // every phone carrying it would upload it every half minute until its deadline.
+    final v = await voucher();
+    await store.put(v, VoucherKind.received);
+    final relayer = gateway((_) => {'status': 'invalid', 'reason': 'nonce spent by another voucher'});
+    await relayer.sync();
+    await relayer.sync();
+    expect(uploads.length, 1);
+    expect((await stored(v)).outcome, Outcome.failed);
+  });
+
+  test('a relayer address with a trailing slash still reaches the upload endpoint', () async {
+    await store.put(await voucher(), VoucherKind.sent);
+    Uri? asked;
+    await Gateway(store, 'https://relayer.test/', client: MockClient((request) async {
+      asked = request.url;
+      return http.Response(jsonEncode({'results': [{'status': 'settled'}]}), 200);
+    })).sync();
+    expect(asked.toString(), 'https://relayer.test/vouchers');
+  });
+
+  // "No signal" is normal and needs no action. A wrong address or a broken relayer is not, and
+  // on a phone with working internet it would otherwise look exactly the same.
+  test('a relayer fault is not reported as having no signal', () async {
+    await store.put(await voucher(), VoucherKind.sent);
+    Future<String?> problemWith(MockClient client) async {
+      final attempted = Completer<void>();
+      final relayer = Gateway(store, 'https://relayer.test', client: client, onChange: attempted.complete);
+      relayer.start();
+      await attempted.future;
+      await relayer.stop();
+      return relayer.problem;
+    }
+
+    expect(await problemWith(MockClient((_) async => throw http.ClientException('Failed host lookup'))), 'No signal');
+    expect(await problemWith(MockClient((_) async => http.Response('Not Found', 404))), contains('404'));
   });
 
   test('with no signal nothing is marked settled, and the failure is reported', () async {
@@ -99,7 +139,7 @@ void main() {
     final offline = Gateway(store, 'https://relayer.test',
         client: MockClient((_) async => throw http.ClientException('Failed host lookup')));
     await expectLater(offline.sync(), throwsA(isA<http.ClientException>()));
-    expect((await stored(v)).settled, isFalse);
+    expect((await stored(v)).outcome, isNull);
   });
 
   // The demo's "C turns on data and the voucher settles": nobody presses anything.
@@ -129,6 +169,6 @@ void main() {
     final confused = Gateway(store, 'https://relayer.test',
         client: MockClient((_) async => http.Response(jsonEncode({'results': [{'status': 'settled', 'tx': 'tx1'}]}), 200)));
     await expectLater(confused.sync(), throwsStateError);
-    expect([(await stored(a)).settled, (await stored(b)).settled], [false, false]);
+    expect([(await stored(a)).outcome, (await stored(b)).outcome], [null, null]);
   });
 }

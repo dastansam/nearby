@@ -10,11 +10,15 @@ import 'voucher/nep413.dart';
 /// and are only carried toward the internet.
 enum VoucherKind { sent, received, relayed }
 
-/// [settled] is what the relayer reported; [tx] is the settling transaction when it knew it.
-typedef StoredVoucher = ({VoucherKind kind, int hops, Map<String, dynamic> voucher, bool settled, String? tx});
+/// What the relayer reported about a voucher: it is on chain, or it never will be.
+enum Outcome { settled, failed }
 
-/// Whether a stored voucher can still settle: it has not already, and its deadline has not passed.
-bool canSettle(StoredVoucher s, DateTime now) => !s.settled && voucherDeadline(s.voucher).isAfter(now);
+/// [outcome] is null until the relayer has given a final answer; [tx] is the settling transaction
+/// when it knew it.
+typedef StoredVoucher = ({VoucherKind kind, int hops, Map<String, dynamic> voucher, Outcome? outcome, String? tx});
+
+/// Whether a stored voucher can still settle: no final answer yet, and its deadline has not passed.
+bool canSettle(StoredVoucher s, DateTime now) => s.outcome == null && voucherDeadline(s.voucher).isAfter(now);
 
 class VoucherStore {
   final Database _db;
@@ -22,16 +26,16 @@ class VoucherStore {
   final _puts = StreamController<StoredVoucher>.broadcast(sync: true);
   VoucherStore._(this._db);
 
-  static const _settledColumns = ['settled INTEGER NOT NULL DEFAULT 0', 'tx TEXT'];
+  static const _outcomeColumns = ['outcome TEXT', 'tx TEXT'];
   static final _schema = 'CREATE TABLE vouchers (key TEXT PRIMARY KEY, kind TEXT NOT NULL, '
-      'hops INTEGER NOT NULL, json TEXT NOT NULL, created_at INTEGER NOT NULL, ${_settledColumns.join(', ')})';
+      'hops INTEGER NOT NULL, json TEXT NOT NULL, created_at INTEGER NOT NULL, ${_outcomeColumns.join(', ')})';
 
   static Future<VoucherStore> open([String path = 'nearby.db']) async => VoucherStore._(await openDatabase(path,
       version: 3,
       onCreate: (db, _) => db.execute(_schema),
       onUpgrade: (db, from, _) async {
         if (from == 2) {
-          for (final column in _settledColumns) {
+          for (final column in _outcomeColumns) {
             await db.execute('ALTER TABLE vouchers ADD COLUMN $column');
           }
           return;
@@ -82,14 +86,16 @@ class VoucherStore {
       if (claim) await txn.update('vouchers', {'kind': kind.name}, where: 'key = ?', whereArgs: [key]);
       return claim ? held.single['hops'] as int : null;
     });
-    if (storedHops != null) _puts.add((kind: kind, hops: storedHops, voucher: voucher, settled: false, tx: null));
+    if (storedHops != null) _puts.add((kind: kind, hops: storedHops, voucher: voucher, outcome: null, tx: null));
     return storedHops != null;
   }
 
-  /// Records that the relayer reported [voucher] settled, in [tx] if it knew. The row stays, so the
-  /// mesh still counts the voucher as held and does not fetch it again.
-  Future<void> markSettled(Map<String, dynamic> voucher, String? tx) => _db.rawUpdate(
-      'UPDATE vouchers SET settled = 1, tx = COALESCE(?, tx) WHERE key = ?', [tx, voucherKey(voucher)]);
+  /// Records the relayer's final answer for [voucher], with the settling [tx] if it knew one. The
+  /// row stays, so the mesh still counts the voucher as held and does not fetch it again. A
+  /// voucher recorded as settled stays settled, and keeps the transaction it has.
+  Future<void> setOutcome(Map<String, dynamic> voucher, Outcome outcome, {String? tx}) => _db.rawUpdate(
+      "UPDATE vouchers SET outcome = ?, tx = COALESCE(?, tx) WHERE key = ? AND outcome IS NOT 'settled'",
+      [outcome.name, tx, voucherKey(voucher)]);
 
   Future<Set<String>> keys() async => {for (final r in await _db.query('vouchers', columns: ['key'])) r['key'] as String};
 
@@ -100,7 +106,7 @@ class VoucherStore {
             kind: VoucherKind.values.byName(r['kind'] as String),
             hops: r['hops'] as int,
             voucher: jsonDecode(r['json'] as String) as Map<String, dynamic>,
-            settled: r['settled'] == 1,
+            outcome: r['outcome'] == null ? null : Outcome.values.byName(r['outcome'] as String),
             tx: r['tx'] as String?,
           )
       ];

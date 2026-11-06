@@ -99,12 +99,13 @@ void main() {
 
   test('a voucher marked settled keeps its transaction and its place in the store', () async {
     await store.put(voucher, VoucherKind.received);
-    await store.markSettled(voucher, 'tx1');
-    // A later report without the hash (another relayer settled it) must not lose the link we had.
-    await store.markSettled(voucher, null);
+    await store.setOutcome(voucher, Outcome.settled, tx: 'tx1');
+    // Later reports must not lose the link we had or undo the settlement: the money has moved.
+    await store.setOutcome(voucher, Outcome.settled);
+    await store.setOutcome(voucher, Outcome.failed);
 
     final stored = (await store.all()).singleWhere((s) => voucherKey(s.voucher) == voucherKey(voucher));
-    expect((stored.settled, stored.tx), (true, 'tx1'));
+    expect((stored.outcome, stored.tx), (Outcome.settled, 'tx1'));
     expect(await store.put(voucher, VoucherKind.received), isFalse, reason: 'settled is still not a new payment');
   });
 
@@ -122,8 +123,8 @@ void main() {
 
     final upgraded = await VoucherStore.open(path);
     final kept = (await upgraded.all()).single;
-    expect((kept.kind, kept.settled, kept.tx), (VoucherKind.received, false, null));
-    await upgraded.markSettled(voucher, 'tx1');
+    expect((kept.kind, kept.outcome, kept.tx), (VoucherKind.received, null, null));
+    await upgraded.setOutcome(voucher, Outcome.settled, tx: 'tx1');
     expect((await upgraded.all()).single.tx, 'tx1');
   });
 

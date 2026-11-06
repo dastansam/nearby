@@ -167,7 +167,7 @@ void main() {
     final settled = await payment(), pending = await payment();
     await gateway.store.put(settled, VoucherKind.relayed, hops: 1);
     await gateway.store.put(pending, VoucherKind.relayed, hops: 1);
-    await gateway.store.markSettled(settled, 'tx1');
+    await gateway.store.setOutcome(settled, Outcome.settled, tx: 'tx1');
 
     air.link(gateway, late);
     await air.settle();
