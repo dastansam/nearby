@@ -7,6 +7,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
 
 import '../store.dart';
 import '../voucher/nep413.dart';
@@ -14,6 +15,10 @@ import 'transport.dart';
 
 /// A voucher is not passed on after this many hops, which bounds how far junk can spread.
 const maxHops = 8;
+
+/// The app signs vouchers valid for 72 h. A relay refuses ones valid far longer: nothing prunes
+/// the store yet, so junk with a deadline in the year 9999 would be carried forever.
+const _maxLifetime = Duration(days: 7);
 
 /// Ids per "have" or "want" message, to stay under Nearby's 32 KB limit for one payload.
 const _idsPerMessage = 1000;
@@ -64,8 +69,10 @@ class Gossip {
     await _transport.stop();
   }
 
-  /// One event at a time, in arrival order. A peer's bad message fails alone.
-  Future<void> _enqueue(Future<void> Function() task) => _queue = _queue.then((_) => task()).catchError((_) {});
+  /// One event at a time, in arrival order. A peer's bad message fails alone, and is logged:
+  /// a local fault (say, the database) would otherwise look like a healthy mesh that relays nothing.
+  Future<void> _enqueue(Future<void> Function() task) =>
+      _queue = _queue.then((_) => task()).catchError((Object e) => debugPrint('gossip: $e'));
 
   /// Vouchers worth passing on, by gossip id: not expired and not at the hop limit.
   Future<Map<String, StoredVoucher>> _forwardable() async {
@@ -85,8 +92,9 @@ class Gossip {
     }
   }
 
+  /// A peer that just walked away must not stop the others being served; its disconnect is on the way.
   Future<void> _send(String peer, Map<String, dynamic> message) =>
-      _transport.send(peer, utf8.encode(jsonEncode(message)));
+      _transport.send(peer, utf8.encode(jsonEncode(message))).catchError((Object e) => debugPrint('gossip: $e'));
 
   Future<void> _handle(String peer, dynamic m) async {
     switch (m['t']) {
@@ -106,6 +114,7 @@ class Gossip {
         final v = m['v'] as Map<String, dynamic>, hops = m['hops'] as int;
         // Carry only what could still settle: a relay has no other way to tell a payment from junk.
         if (hops < 1 || hops > maxHops || await verifyVoucher(v) != null) return;
+        if (voucherDeadline(v).isAfter(DateTime.now().add(_maxLifetime))) return;
         if (!await _store.put(v, VoucherKind.relayed, hops: hops)) return;
         if (hops < maxHops) await _sendIds(_peers.where((p) => p != peer), 'have', [gossipId(voucherKey(v))]);
     }

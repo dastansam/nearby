@@ -38,6 +38,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Gossip? _gossip;
   StreamSubscription<void>? _puts;
   Timer? _reload;
+  int _carried = 0;
   Object? _meshError;
   bool _busy = false; // a Pay or Receive flow is open; a second tap must not start another
 
@@ -79,6 +80,8 @@ class _HomeScreenState extends State<HomeScreen> {
       await gossip.start();
       if (mounted) setState(() => _gossip = gossip);
     } catch (e) {
+      // Starting can fail halfway (advertising up, discovery refused); do not leave half a mesh running unseen.
+      await gossip.stop().catchError((_) {});
       if (mounted) setState(() => _meshError = e);
     }
   }
@@ -98,8 +101,13 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _reloadVouchers() async {
-    final vouchers = await _store.all();
-    if (mounted) setState(() => _vouchers = vouchers);
+    final all = await _store.all();
+    if (!mounted) return;
+    // Only this phone's own payments are listed; carried ones would bury them, so they are just counted.
+    setState(() {
+      _vouchers = all.where((v) => v.kind != VoucherKind.relayed).toList();
+      _carried = all.length - _vouchers.length;
+    });
   }
 
   @override
@@ -129,7 +137,7 @@ class _HomeScreenState extends State<HomeScreen> {
           title: Text(_gossip == null ? 'Mesh off' : '${_gossip!.peerCount} phones connected'),
           subtitle: Text(_gossip == null
               ? (_meshError == null ? 'Starting' : 'QR payments still work. $_meshError')
-              : 'Carrying ${_vouchers.where((v) => v.kind == VoucherKind.relayed).length} payments for others'),
+              : 'Carrying $_carried payments toward the internet'),
         ),
         Padding(
           padding: const EdgeInsets.all(16),
@@ -155,14 +163,6 @@ class _HomeScreenState extends State<HomeScreen> {
             itemCount: _vouchers.length,
             itemBuilder: (context, i) {
               final v = _vouchers[i];
-              // A relayed voucher is only signature-checked, so its contents are not shown as an amount.
-              if (v.kind == VoucherKind.relayed) {
-                return ListTile(
-                  leading: const Icon(Icons.swap_horiz),
-                  title: const Text('Carrying a payment for someone else'),
-                  subtitle: Text('Hop ${v.hops} of $maxHops'),
-                );
-              }
               final sent = v.kind == VoucherKind.sent;
               return ListTile(
                 leading: Icon(sent ? Icons.arrow_upward : Icons.arrow_downward),

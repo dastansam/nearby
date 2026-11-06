@@ -201,10 +201,31 @@ void main() {
       await expectDropped({'t': 'voucher', 'v': v, 'hops': 1});
     });
 
+    test('a voucher valid for years, which nothing would ever clear out', () async {
+      final v = await signVoucher(await Ed25519().newKeyPair(), [Transfer('merchant.near', {usdcToken: '1'})],
+          DateTime.now().add(const Duration(days: 365)), makeNonce());
+      await expectDropped({'t': 'voucher', 'v': v, 'hops': 1});
+    });
+
     test('a voucher claiming an impossible hop count', () async {
       await expectDropped({'t': 'voucher', 'v': await payment(), 'hops': 0});
       await expectDropped({'t': 'voucher', 'v': await payment(), 'hops': maxHops + 1});
     });
+  });
+
+  // Phones walk out of range all the time, and the radio reports it late.
+  test('a phone that walked off does not stop the others being served', () async {
+    final a = await phone('a'), gone = await phone('gone'), c = await phone('c');
+    air.link(a, gone);
+    air.link(a, c);
+    await air.settle();
+    a.radio.inRange.remove('gone');
+
+    final voucher = await payment();
+    await a.store.put(voucher, VoucherKind.sent);
+    await air.settle();
+
+    expect(await c.holds(voucher), isTrue);
   });
 
   test('a garbage message from one peer does not stop the relay working', () async {
