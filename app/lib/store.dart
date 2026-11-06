@@ -15,7 +15,7 @@ typedef StoredVoucher = ({VoucherKind kind, int hops, Map<String, dynamic> vouch
 class VoucherStore {
   final Database _db;
   // Sync, so listeners hear about a voucher before put() returns and in the order they were stored.
-  final _puts = StreamController<({String key, VoucherKind kind})>.broadcast(sync: true);
+  final _puts = StreamController<StoredVoucher>.broadcast(sync: true);
   VoucherStore._(this._db);
 
   static const _schema = 'CREATE TABLE vouchers (key TEXT PRIMARY KEY, kind TEXT NOT NULL, '
@@ -42,7 +42,7 @@ class VoucherStore {
       }));
 
   /// Each voucher as it is stored or claimed, so the mesh can offer it and the screen can show it.
-  Stream<({String key, VoucherKind kind})> get puts => _puts.stream;
+  Stream<StoredVoucher> get puts => _puts.stream;
 
   /// Stores a voucher under its signer and nonce. Returns false, changing nothing, if that slot
   /// is taken: the chain settles it once, so a voucher shown again is the same payment, not a
@@ -70,7 +70,7 @@ class VoucherStore {
       if (claim) await txn.update('vouchers', {'kind': kind.name}, where: 'key = ?', whereArgs: [key]);
       return claim;
     });
-    if (stored) _puts.add((key: key, kind: kind));
+    if (stored) _puts.add((kind: kind, hops: hops, voucher: voucher));
     return stored;
   }
 

@@ -48,7 +48,7 @@ class Gossip {
     // This phone's own payments go out the moment they are stored, while the payer is still
     // showing the QR. Relayed ones are offered by _handle, which knows which peer to skip.
     _puts = _store.puts.listen((p) {
-      if (p.kind != VoucherKind.relayed) _enqueue(() => _sendIds(_peers, 'have', [gossipId(p.key)]));
+      if (p.kind != VoucherKind.relayed) _enqueue(() => _sendIds(_peers, 'have', [gossipId(voucherKey(p.voucher))]));
     });
     return _transport.start(
       onConnected: (peer) => _enqueue(() async {

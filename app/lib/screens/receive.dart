@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
@@ -5,7 +8,15 @@ import '../store.dart';
 import '../voucher/payment.dart';
 import 'scan.dart';
 
-/// Payee side: ask for an amount, show the request QR, then scan and check the payer's voucher.
+/// Why [voucher] (as JSON) is not a new payment of [request], or null once it is stored as received.
+Future<String?> acceptPayment(VoucherStore store, PaymentRequest request, String voucher) async {
+  final check = await checkPayment(voucher, request);
+  if (check.voucher == null) return check.reason;
+  return await store.put(check.voucher!, VoucherKind.received) ? null : 'replay';
+}
+
+/// Payee side: ask for an amount, show the request QR, then check the payer's voucher, which
+/// arrives over the mesh or is scanned from the payer's screen.
 class ReceiveScreen extends StatefulWidget {
   final String accountId;
   final VoucherStore store;
@@ -21,9 +32,29 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
   bool _paid = false;
   String? _rejection; // why the last scanned voucher was refused
   bool _scanning = false; // a second tap must not stack a second scanner
+  late final StreamSubscription<void> _mesh;
+
+  @override
+  void initState() {
+    super.initState();
+    // The payer's phone usually delivers the voucher over the mesh before anyone scans it. Other
+    // people's payments arrive the same way, so one that is not for this request is not a rejection.
+    _mesh = widget.store.puts.listen((p) async {
+      final request = _request;
+      if (request == null || _paid || p.kind != VoucherKind.relayed) return;
+      // Nearly everything the mesh brings is someone else's; skip those before the signature check.
+      if (!(p.voucher['payload']['message'] as String).contains(request.memoTag)) return;
+      if (await acceptPayment(widget.store, request, jsonEncode(p.voucher)) != null || !mounted) return;
+      setState(() {
+        _paid = true;
+        _rejection = null;
+      });
+    });
+  }
 
   @override
   void dispose() {
+    _mesh.cancel();
     _amount.dispose();
     super.dispose();
   }
@@ -34,7 +65,8 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Enter an amount like 2.50')));
       return;
     }
-    setState(() => _request = PaymentRequest(receiverId: widget.accountId, token: usdcToken, amount: units));
+    setState(() => _request =
+        PaymentRequest(receiverId: widget.accountId, token: usdcToken, amount: units, id: newRequestId()));
   }
 
   Future<void> _scanVoucher() async {
@@ -43,10 +75,9 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     try {
       final qr = await scanQr(context, 'Scan the voucher');
       if (qr == null) return;
-      final check = await checkPayment(qr, _request!);
-      var rejection = check.reason;
-      if (check.voucher != null && !await widget.store.put(check.voucher!, VoucherKind.received)) rejection = 'replay';
-      if (!mounted) return;
+      final rejection = await acceptPayment(widget.store, _request!, qr);
+      // If the same voucher came in over the mesh meanwhile, it is paid, not a replay.
+      if (!mounted || _paid) return;
       setState(() {
         _paid = rejection == null;
         _rejection = rejection;
