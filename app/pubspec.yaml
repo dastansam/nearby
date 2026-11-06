@@ -1,5 +1,5 @@
 name: nearby
-description: Offline payments over the qaul mesh, settled on NEAR Intents.
+description: Offline payments relayed phone to phone, settled on NEAR Intents.
 publish_to: none
 version: 0.1.0+1
 
@@ -18,8 +18,6 @@ dependencies:
   qr_flutter: ^4.1.0
   mobile_scanner: ^5.1.1
   flutter_secure_storage: ^11.2.0
-  # qaul transport: libqaul is driven via protobuf over send_rpc/receive_rpc.
-  # Decide on day 2: embed libqaul (FFI) or fork qaul_ui and add a wallet tab.
 
 dev_dependencies:
   flutter_test:
