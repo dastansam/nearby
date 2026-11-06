@@ -35,6 +35,12 @@ impl ChainError {
             Self::Refused(reason) | Self::Unknown(reason) => reason,
         }
     }
+
+    /// For calls that do not judge a voucher: if the contract panics there, that says something
+    /// about the contract, and nothing about any voucher.
+    fn not_a_refusal(self) -> Self {
+        Self::Unknown(self.reason().to_owned())
+    }
 }
 
 pub trait Chain: Send + Sync + 'static {
@@ -102,7 +108,10 @@ impl NearChain {
                 .json::<Value>()
                 .await
         };
-        let mut response = sent.await.map_err(|e| ChainError::Unknown(e.to_string()))?;
+        // Without the URL: it can hold the RPC provider's API key, and this text is sent on to phones.
+        let mut response = sent
+            .await
+            .map_err(|e| ChainError::Unknown(e.without_url().to_string()))?;
         match response.get_mut("result") {
             // Some nodes report a failed view inside the result rather than as an RPC error.
             Some(result) if result.get("error").is_none() => Ok(result.take()),
@@ -133,7 +142,8 @@ impl Chain for NearChain {
     async fn balance_of(&self, account: &str, token: &str) -> Result<At<String>, ChainError> {
         let At { value, block } = self
             .view("mt_balance_of", json!({ "account_id": account, "token_id": token }))
-            .await?;
+            .await
+            .map_err(ChainError::not_a_refusal)?;
         let balance = value
             .as_str()
             .ok_or_else(|| ChainError::Unknown(format!("balance is not a string: {value}")))?;
@@ -146,7 +156,8 @@ impl Chain for NearChain {
     async fn is_nonce_used(&self, account: &str, nonce_base64: &str) -> Result<At<bool>, ChainError> {
         let At { value, block } = self
             .view("is_nonce_used", json!({ "account_id": account, "nonce": nonce_base64 }))
-            .await?;
+            .await
+            .map_err(ChainError::not_a_refusal)?;
         let used = value
             .as_bool()
             .ok_or_else(|| ChainError::Unknown(format!("is_nonce_used is not a boolean: {value}")))?;
@@ -163,7 +174,12 @@ impl Chain for NearChain {
         let unexpected = |what: &str, got: &Value| ChainError::Unknown(format!("unexpected {what}: {got}"));
         let public_key = self.key.verifying_key().to_bytes();
         let access = json!({ "request_type": "view_access_key", "finality": "optimistic", "account_id": self.account, "public_key": tag(&public_key) });
-        let access = self.call("query", access).await?;
+        // A final block: a transaction that names a block which is later dropped is invalid.
+        let (access, block) = tokio::try_join!(
+            self.call("query", access),
+            self.call("block", json!({ "finality": "final" }))
+        )
+        .map_err(ChainError::not_a_refusal)?;
         let seen = access["nonce"]
             .as_u64()
             .ok_or_else(|| unexpected("access key", &access))?;
@@ -173,8 +189,6 @@ impl Chain for NearChain {
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, next)
             .map(|last| last.max(seen) + 1)
             .expect("always Some");
-        // A final block: a transaction that names a block which is later dropped is invalid.
-        let block = self.call("block", json!({ "finality": "final" })).await?;
         let block_hash: [u8; 32] = block["header"]["hash"]
             .as_str()
             .and_then(untag)

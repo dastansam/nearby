@@ -141,6 +141,11 @@ pub fn verify_voucher(v: &SignedVoucher, now: DateTime<Utc>) -> Result<Checked, 
     if !signed {
         return Err("signature");
     }
+    // One spelling only, as the app requires too. The relayer tells vouchers apart by their signature
+    // text: a copy with the "ed25519:" left off would pass for a second voucher, and a double-spend.
+    if v.public_key != tag(&public_key) || v.signature != tag(&signature) {
+        return Err("malformed");
+    }
     // A versioned nonce settles only if its salt is still valid and its own deadline has not passed.
     // Neither can be checked offline, so plain nonces only.
     if nonce.starts_with(&VERSIONED_NONCE_PREFIX) {
@@ -257,6 +262,20 @@ mod tests {
         let mut v = sign_voucher(&k, &message(&k, &in_three_days()), &[0xff; 32]);
         v.payload.nonce = v.payload.nonce.replace('/', "_");
         assert_eq!(reason(&v), Some("malformed"));
+    }
+
+    // Anyone carrying a voucher could otherwise re-upload it respelled, and the relayer would
+    // publish the two spellings as proof that an honest payer double-spent.
+    #[test]
+    fn rejects_a_key_or_signature_written_without_its_prefix() {
+        let k = key();
+        let signed = sign_voucher(&k, &message(&k, &in_three_days()), &make_nonce());
+        let (mut bare_signature, mut bare_key) = (signed.clone(), signed.clone());
+        bare_signature.signature = signed.signature.replace("ed25519:", "");
+        bare_key.public_key = signed.public_key.replace("ed25519:", "");
+        assert_eq!(reason(&signed), None);
+        assert_eq!(reason(&bare_signature), Some("malformed"));
+        assert_eq!(reason(&bare_key), Some("malformed"));
     }
 
     #[test]

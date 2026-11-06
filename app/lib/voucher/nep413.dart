@@ -77,7 +77,7 @@ class Transfer {
 /// UTC with millisecond precision, like JS toISOString(): the deadline format checked against intents.near.
 String _isoMillis(DateTime t) => DateTime.fromMillisecondsSinceEpoch(t.millisecondsSinceEpoch, isUtc: true).toIso8601String();
 
-/// The exact JSON string that gets signed. Key order matches the TS reference so both sides
+/// The exact JSON string that gets signed. Key order matches the relayer (relayer/src/voucher.rs) so both sides
 /// hash the same bytes.
 String intentMessage(String signerId, List<Transfer> intents, DateTime deadline) => jsonEncode({
       'signer_id': signerId,

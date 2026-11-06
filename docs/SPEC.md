@@ -124,7 +124,7 @@ The mesh is our own: a gossip layer of about 300 lines of Dart on top of Android
 | Transport | [nearby_connections](https://pub.dev/packages/nearby_connections) 4.3.0 | Android-only plugin; cluster strategy for many-to-many ([strategies](https://developers.google.com/nearby/connections/strategies)) |
 | Gossip layer | Our Dart code behind a `Transport` interface | Outbox, hash exchange on connect, dedup, hop limit 8 |
 | Hand-off fallback | QR (mobile_scanner + qr_flutter) | Works with every radio off |
-| Signing | `cryptography` (Ed25519), `crypto` (SHA-256), base58 | NEP-413; byte-identical to the TS reference (tested) |
+| Signing | `cryptography` (Ed25519), `crypto` (SHA-256), base58 | NEP-413; byte-identical to the relayer, pinned by `testdata/voucher-vector.json` |
 | Local store | sqflite | Outbox, seen vouchers, receipts, attestation |
 | Relayer | Rust, axum | `execute_intents`, balance attestations, equivocation detection |
 | Settlement | `intents.near`, mainnet only ([no testnet](https://docs.near-intents.org/integration/verifier-contract/introduction)) | Transfer intents; deposits via `ft_transfer_call` |

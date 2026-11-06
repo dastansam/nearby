@@ -64,7 +64,12 @@ async fn upload<C: Chain>(
 ) -> Response {
     match body {
         Ok(Json(Upload { vouchers })) if vouchers.len() <= MAX_VOUCHERS => {
-            Json(json!({ "results": relayer.settler.settle(&vouchers).await })).into_response()
+            // In a task of its own: a phone that loses its signal mid-upload drops this request, and
+            // that must not stop a settlement halfway, with a transaction sent and nothing recorded.
+            match tokio::spawn(async move { relayer.settler.settle(&vouchers).await }).await {
+                Ok(results) => Json(json!({ "results": results })).into_response(),
+                Err(_) => refuse(StatusCode::INTERNAL_SERVER_ERROR, "settlement stopped unexpectedly"),
+            }
         }
         _ => refuse(
             StatusCode::BAD_REQUEST,

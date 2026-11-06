@@ -4,7 +4,7 @@ use crate::voucher::{verify_voucher, Checked, SignedVoucher, USDC_TOKEN};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -55,6 +55,14 @@ impl Spent {
 /// How long a refusal is repeated without asking the chain again: every phone carrying the voucher re-uploads it.
 const REFUSAL_TTL: Duration = Duration::from_secs(60);
 
+/// How long after a transaction went out with no answer before another is sent for the same voucher.
+/// The first may still land; a second one sent meanwhile fails on chain and its gas is wasted.
+const IN_FLIGHT: Duration = Duration::from_secs(120);
+
+/// Proofs kept. They are free to make for anyone with a key, and only until the bond contract
+/// exists is every signer's worth keeping.
+const MAX_PROOFS: usize = 10_000;
+
 /// A map that forgets its oldest entry once full. These are fed by anyone who can sign.
 struct Remembered<V> {
     entries: HashMap<String, V>,
@@ -88,9 +96,13 @@ struct State {
     done: HashMap<String, Spent>,
     /// By signature: the contract's reason, and until when it is repeated unasked.
     refused: Remembered<(String, Instant)>,
+    /// "signer:nonce" -> until when a transaction this relayer sent may still be on its way.
+    in_flight: Remembered<Instant>,
     /// "signer:seq" -> the first voucher seen with that sequence number.
     by_seq: Remembered<SignedVoucher>,
     equivocations: Vec<(SignedVoucher, SignedVoucher)>,
+    /// Signatures of the second voucher of each pair, so no pair is recorded twice.
+    paired: HashSet<String>,
 }
 
 /// A voucher this relayer settles: validly signed, and one USDC transfer.
@@ -141,8 +153,10 @@ impl<C: Chain> Settler<C> {
         let state = State {
             done: HashMap::new(),
             refused: Remembered::new(),
+            in_flight: Remembered::new(),
             by_seq: Remembered::new(),
             equivocations: Vec::new(),
+            paired: HashSet::new(),
         };
         Self {
             chain,
@@ -231,10 +245,30 @@ impl<C: Chain> Settler<C> {
         if expired {
             return Ok(invalid("expired"));
         }
+        if state
+            .in_flight
+            .entries
+            .get(&slot)
+            .is_some_and(|until| *until > Instant::now())
+        {
+            return Err(ChainError::Unknown(
+                "a transaction for this voucher may still be on its way".into(),
+            ));
+        }
         self.chain.simulate(v).await?; // free; execute costs gas even when it fails
+        let tx = match self.chain.execute(v).await {
+            Ok(tx) => tx,
+            Err(e) => {
+                // No answer is not "not sent": the transaction may have gone out and land later.
+                if matches!(e, ChainError::Unknown(_)) {
+                    state.in_flight.insert(slot, Instant::now() + IN_FLIGHT);
+                }
+                return Err(e);
+            }
+        };
         let mut sent = Spent {
             signature: Some(v.signature.clone()),
-            tx: Some(self.chain.execute(v).await?),
+            tx: Some(tx),
             block: None,
         };
         state.done.insert(slot.clone(), sent.clone());
@@ -260,10 +294,8 @@ impl State {
             // can produce a signature, so nobody else can make a real pair look already recorded.
             Some(first)
                 if first.signature != v.signature
-                    && !self
-                        .equivocations
-                        .iter()
-                        .any(|(_, second)| second.signature == v.signature) =>
+                    && self.equivocations.len() < MAX_PROOFS
+                    && self.paired.insert(v.signature.clone()) =>
             {
                 self.equivocations.push((first.clone(), v.clone()));
             }

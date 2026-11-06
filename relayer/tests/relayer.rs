@@ -24,9 +24,10 @@ struct Fake {
     used: HashSet<String>,           // "account:nonce" already settled on chain
     refuse: HashMap<String, String>, // nonce -> the contract's panic message
     down: bool,
-    fails_after_executing: bool, // the chain is lost right after a transaction goes through
-    lagging: bool,               // the node answering views has not seen what was just executed
-    lookups: usize,              // calls made
+    fails_after_executing: bool,  // the chain is lost right after a transaction goes through
+    no_answer_to_executing: bool, // the transaction goes out, and the answer never comes back
+    lagging: bool,                // the node answering views has not seen what was just executed
+    lookups: usize,               // calls made
     executed: Vec<SignedVoucher>,
     block: u64, // the height every view is answered at
 }
@@ -41,6 +42,7 @@ impl FakeChain {
             refuse: HashMap::new(),
             down: false,
             fails_after_executing: false,
+            no_answer_to_executing: false,
             lagging: false,
             lookups: 0,
             executed: Vec::new(),
@@ -92,6 +94,9 @@ impl Chain for FakeChain {
     async fn execute(&self, v: &SignedVoucher) -> Result<String, ChainError> {
         let mut fake = self.reach().await?;
         fake.executed.push(v.clone());
+        if fake.no_answer_to_executing {
+            return Err(ChainError::Unknown("timed out".into()));
+        }
         if !fake.lagging {
             let message: IntentMessage = serde_json::from_str(&v.payload.message).unwrap();
             fake.used.insert(format!("{}:{}", message.signer_id, v.payload.nonce));
@@ -277,6 +282,28 @@ async fn losing_the_chain_right_after_settling_does_not_turn_the_settlement_into
         settle(&Settler::new(chain.clone()), &[&pay()]).await,
         [settled(Some("tx1"), None)]
     );
+}
+
+// A transaction that got no answer may still land. Sending another for the same voucher meanwhile
+// pays gas for one the chain must refuse, and then reports a paid voucher as refused.
+#[tokio::test]
+async fn a_transaction_that_got_no_answer_is_not_sent_a_second_time_straight_away() {
+    let chain = FakeChain::new();
+    let (settler, v) = (Settler::new(chain.clone()), pay());
+    chain.state().no_answer_to_executing = true;
+    assert!(matches!(settle(&settler, &[&v]).await[..], [Outcome::Error { .. }]));
+    chain.state().no_answer_to_executing = false;
+    assert!(
+        matches!(settle(&settler, &[&v]).await[..], [Outcome::Error { .. }]),
+        "still told to ask again"
+    );
+    assert_eq!(chain.state().executed.len(), 1);
+    // It landed after all: the phone learns so through the nonce, as with any voucher settled elsewhere.
+    chain
+        .state()
+        .used
+        .insert(format!("{}:{}", account(&payer()), v.payload.nonce));
+    assert_eq!(settle(&settler, &[&v]).await, [settled(None, Some(BLOCK))]);
 }
 
 #[tokio::test]
@@ -492,6 +519,52 @@ async fn a_pair_that_reuses_the_nonce_as_well_as_the_sequence_number_is_still_pr
 }
 
 #[tokio::test]
+async fn someone_elses_pair_cannot_make_a_real_proof_look_already_recorded() {
+    // Nonces are public once a voucher is gossiped; a cheat could plant a pair that reuses theirs.
+    let settler = Settler::new(FakeChain::new());
+    let (nonce, throwaway) = (make_nonce(), SigningKey::from_bytes(&[6; 32]));
+    let planted = |nonce| {
+        Pay {
+            key: throwaway.clone(),
+            memo: Some("seq:1 prev:00"),
+            nonce,
+            ..Pay::default()
+        }
+        .sign()
+    };
+    settle(&settler, &[&planted(make_nonce()), &planted(nonce)]).await;
+    let first = Pay {
+        memo: Some("seq:4 prev:00"),
+        ..Pay::default()
+    }
+    .sign();
+    let second = Pay {
+        to: "other.near",
+        memo: Some("seq:4 prev:00"),
+        nonce,
+        ..Pay::default()
+    }
+    .sign();
+    settle(&settler, &[&first, &second]).await;
+    assert_eq!(settler.equivocations().await[1], (first, second));
+}
+
+#[tokio::test]
+async fn the_same_voucher_respelled_is_not_a_second_voucher() {
+    // Whoever carries a voucher can rewrite its text. If that made a pair, any relay could frame an honest payer.
+    let settler = Settler::new(FakeChain::new());
+    let v = Pay {
+        memo: Some("seq:4 prev:00"),
+        ..Pay::default()
+    }
+    .sign();
+    let mut respelled = v.clone();
+    respelled.signature = v.signature.replace("ed25519:", "");
+    assert_eq!(settle(&settler, &[&v, &respelled]).await[1], invalid("malformed"));
+    assert_eq!(settler.equivocations().await, []);
+}
+
+#[tokio::test]
 async fn the_same_sequence_number_from_two_different_payers_is_not_a_double_spend() {
     let settler = Settler::new(FakeChain::new());
     let other = Pay {
@@ -553,6 +626,29 @@ async fn a_gateway_uploads_its_outbox_over_http_and_gets_one_result_per_voucher(
         body,
         json!({ "results": [{ "status": "settled", "tx": "tx1", "block": BLOCK }, { "status": "invalid", "reason": "malformed" }] })
     );
+}
+
+// Phones upload when they briefly have a signal, and often lose it before the answer. The gas is
+// spent either way; what must not happen is a transaction sent and nothing remembered about it.
+#[tokio::test]
+async fn an_upload_is_settled_even_if_the_phone_hangs_up_before_the_answer() {
+    let chain = FakeChain::new();
+    let body = json!({ "vouchers": [pay(), pay()] }).to_string();
+    let upload = Request::post("/vouchers")
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .unwrap();
+    let mut answer = Box::pin(router(chain.clone(), attestation_key(), now).oneshot(upload));
+    tokio::select! {
+        biased;
+        _ = &mut answer => panic!("answered before the chain was even asked"),
+        _ = tokio::task::yield_now() => {}
+    }
+    drop(answer);
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(chain.state().executed.len(), 2);
 }
 
 #[tokio::test]
