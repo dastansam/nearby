@@ -12,6 +12,7 @@ Offline payments relayed phone-to-phone over Bluetooth and Wi-Fi ([Nearby Connec
 4. **Relay (offline):** every phone keeps an outbox; when two phones connect they send each other the vouchers the other lacks, until one of them reaches the internet.
 5. **Settle (online):** any phone with a signal uploads what it holds to the relayer, which submits each voucher to `intents.near` via `execute_intents` and pays gas.
 6. **Punish (online):** two vouchers from one key with the same sequence number are proof of a double-spend. The relayer hands the pair to the bond contract, which checks both signatures itself; the key forfeits its bond and is banned.
+7. **Confirm:** the relayer signs a receipt for each voucher it settles. The uploading phone keeps it and hands it to any phone still carrying that voucher, which marks it settled and stops carrying it. A merchant with a signal sees the chain's answer on the receive screen within seconds of accepting.
 
 ## Run it
 
@@ -75,6 +76,35 @@ Settlements travel back into the mesh: the relayer signs a receipt `{voucher, tx
 One known rough edge of the offline check:
 
 - A refusal cannot unsign a voucher. A payment the merchant's phone refused can still be carried to the relayer and settle; the receive screen says so.
+
+## What works, what's next
+
+Everything in the first table runs in the automated tests (Rust: relayer, bond contract, shared voucher crate; Dart: app). Nothing has yet run on phones or spent real money; see Status.
+
+| Works | Where |
+| --- | --- |
+| Offline ed25519 key; NEP-413 voucher signing and checking, byte-identical in Dart and Rust (`testdata/voucher-vector.json`), dry-run against mainnet `simulate_intents` | `app/lib/voucher/`, `voucher/` |
+| Payment request QR, voucher by radio or QR, payee checks: signature, request id, deadline, nonce, cap, sequence chain, bond, attested balance minus vouchers seen | `app/lib/screens/`, `app/lib/voucher/guards.dart` |
+| Store-and-forward gossip (have / want / voucher / settled) over Nearby Connections on Android and Multipeer Connectivity on iOS, hop limit 8 | `app/lib/mesh/`, `app/android/`, `app/ios/` |
+| Relayer: `execute_intents` settlement, nonce-spent detection, refusals, balance attestations, settlement receipts, double-spend pairs to the bond contract, `GET /equivocations` | `relayer/` |
+| Bond contract: bond in NEAR, 7-day unbonding, `slash` recomputes both hashes and verifies both signatures on chain, forfeit and ban | `bond/` |
+| Receipts carried back into the mesh; the receive screen shows settled / refused / turned down live when the phone has a signal | `app/lib/mesh/gossip.dart`, `app/lib/screens/receive.dart` |
+
+| Next | Why not yet |
+| --- | --- |
+| One funded settlement and one slash on mainnet, with explorer links | Needs a funded offline account and the bond contract deployed |
+| Running on phones: Android (Nearby Connections) and iPhone (Multipeer) | Only tests so far |
+| Compensating the unpaid merchant from a forfeited bond | The contract has no settlement evidence; paying the vouchers' receivers would let a cheat slash themselves |
+| Hardware-held offline keys (StrongBox / Secure Enclave), attested by the relayer | Stretch in the spec |
+| Pruning settled and expired vouchers from the store | Nothing is pruned yet; relays refuse vouchers valid longer than 7 days as a stopgap |
+| Receipts pushed to peers already connected | They go out in reply to the next `have` |
+| Who pays gas: a fee per voucher or a sponsor | Open question; the relayer pays today |
+
+## Libraries
+
+App (Flutter): `cryptography` (ed25519, sha256), `crypto`, `bs58`, `convert`, `sqflite`, `qr_flutter`, `mobile_scanner`, `flutter_secure_storage`, `http`, `nearby_connections`, `permission_handler`; on iOS, Apple's Multipeer Connectivity through a small Swift plugin.
+Relayer (Rust): `axum`, `tokio`, `reqwest`, `ed25519-dalek`, `serde` / `serde_json`, `sha2`, `base64`, `bs58`, `hex`, `rand`, `regex`, `chrono`.
+Bond contract (Rust): `near-sdk`. Shared voucher crate: `serde_json`, `sha2`, `bs58`, `base64`, `hex`, with `ed25519-dalek` and `rand` behind the `sign` feature.
 
 ## License
 
