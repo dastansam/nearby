@@ -17,9 +17,17 @@ final paymentCap = BigInt.from(25000000);
 const minimumBondNear = 5;
 final minimumBond = BigInt.from(minimumBondNear) * BigInt.from(10).pow(24);
 
+/// The payer chooses the deadline. One far off would let them unbond and withdraw (7 days in the
+/// contract) before a voucher held back on purpose could be slashed. [voucherLifetime] is what the
+/// app signs; the hour is for the two phones' clocks.
+final maxVoucherLife = voucherLifetime + const Duration(hours: 1);
+
 /// The value of entry [name] in a voucher's memo ("req:9f2c seq:17 prev:00"), or null.
 String? memoEntry(Map<String, dynamic> v, String name) =>
     memoEntries(v).where((e) => e.startsWith('$name:')).map((e) => e.substring(name.length + 1)).firstOrNull;
+
+/// When [v] expires; the signature check has already made sure this parses.
+DateTime _deadline(Map<String, dynamic> v) => DateTime.parse(jsonDecode(v['payload']['message'])['deadline']);
 
 /// A voucher's sequence number. Only the one plain spelling counts: the relayer pairs double-spends
 /// by the text of the number, so "5" and "05" must not both be accepted as the fifth voucher.
@@ -81,6 +89,7 @@ String? checkGuards(
 }) {
   final amount = usdcOut(voucher);
   if (amount > paymentCap) return 'cap';
+  if (_deadline(voucher).isAfter(now.add(maxVoucherLife))) return 'deadline';
 
   final seq = _seq(voucher);
   if (seq == null) return 'sequence';
@@ -102,6 +111,7 @@ String? checkGuards(
 /// What to tell the payee for each refusal from [checkGuards].
 final guardRefusals = {
   'cap': 'over the limit of ${formatUsdc(paymentCap.toString())} for one offline payment',
+  'deadline': 'the payment stays valid for more than ${voucherLifetime.inHours} h',
   'sequence': 'broken payment sequence',
   'double-spend': 'double-spend: the payer already used this sequence number',
   'attestation': 'no valid balance attestation from the payer',

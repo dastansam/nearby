@@ -11,7 +11,7 @@ Offline payments relayed phone-to-phone over Bluetooth and Wi-Fi ([Nearby Connec
 3. **Verify (offline):** the merchant checks the signature, the deadline and the nonce, then the payer: no payment over 25 USDC, a sequence number not seen before from that payer, a bond of at least 5 NEAR, and a balance the relayer attested in the last 24 h that still covers the payment after subtracting every voucher of that payer the merchant's phone has seen. The attestation (balance and bond) travels with the voucher, in the QR code and over the relay.
 4. **Relay (offline):** every phone keeps an outbox; when two phones connect they send each other the vouchers the other lacks, until one of them reaches the internet.
 5. **Settle (online):** any phone with a signal uploads what it holds to the relayer, which submits each voucher to `intents.near` via `execute_intents` and pays gas.
-6. **Punish (online):** two vouchers from one key with the same sequence number are proof of a double-spend. The relayer hands the pair to the bond contract, which checks both signatures itself, pays the bond to the two merchants and bans the key.
+6. **Punish (online):** two vouchers from one key with the same sequence number are proof of a double-spend. The relayer hands the pair to the bond contract, which checks both signatures itself; the key forfeits its bond and is banned.
 
 ## Run it
 
@@ -28,7 +28,7 @@ near contract call-function as-transaction bond.you.near bond_for json-args '{"a
   prepaid-gas '30 Tgas' attached-deposit '5 NEAR' sign-as you.near network-config mainnet sign-with-keychain send
 ```
 
-`unbond` then `withdraw` (4 days later) take it back. Views: `bond_of` (what backs payments now: 0 while unbonding or banned), `at_stake` (what a proof would take: the bond, unbonding or not) and `is_banned`. `slash(a, b)` takes two signed vouchers; a key with nothing at stake is turned away, not banned.
+At least 1 NEAR per call. Whoever paid first owns the bond: `unbond(account)` then `withdraw(account)` 7 days later return it to them. Views: `bond_of` (what backs payments now: 0 while unbonding or banned), `at_stake` (what a proof would take: the bond, unbonding or not) and `is_banned`. `slash(a, b)` takes two signed vouchers; a key with nothing at stake is turned away, not banned.
 
 Relayer, from `relayer/`:
 
@@ -68,7 +68,7 @@ Hackathon build for NEAR Hackathon (submissions close 2026-11-14 23:59 UTC). Mai
 
 Not yet proven: no voucher has settled with a funded account (only dry runs against mainnet), and the phone-to-phone relay has only run in tests, not on phones.
 
-Double-spending offline is bounded, provable and punished, not prevented. A payer can still overspend across merchants who have not seen each other's vouchers, up to 25 USDC each, for as long as their attestation lasts. Two vouchers with one sequence number prove it; the relayer hands the pair to the bond contract, which pays the bond (5 NEAR or more) to the two merchants and bans the key. The contract has 13 unit tests and has not been deployed or slashed on mainnet yet; the bond is in NEAR while the budget is in USDC, so the two are not compared, and a payer cheating many merchants in one afternoon can still take more than the bond.
+Double-spending offline is bounded, provable and punished, not prevented. A payer can still overspend across merchants who have not seen each other's vouchers, up to 25 USDC each, for as long as their attestation lasts. Two vouchers with one sequence number prove it; the relayer hands the pair to the bond contract, and the key forfeits its bond (5 NEAR or more) and is banned. The forfeited bond stays in the contract: paying it to the vouchers' receivers would let a cheat name their own accounts and slash themselves, and compensating the merchant left unpaid needs settlement evidence the contract does not have. The contract has 15 unit tests and has not been deployed or slashed on mainnet yet; the bond is in NEAR while the budget is in USDC, so the two are not compared, and a payer cheating many merchants in one afternoon can still take more than the bond.
 
 Two known rough edges of the offline check:
 

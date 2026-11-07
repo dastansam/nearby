@@ -135,6 +135,19 @@ void main() {
       expect(refusal(v, a: attested('3000000', bond: minimumBond)), isNull);
     });
 
+    // The bond can be withdrawn 7 days after notice. A voucher valid for longer could be held back
+    // and settled once there is nothing left to slash.
+    test('refuses a payment that stays valid for longer than the app ever signs', () async {
+      final a = attested('9000000');
+      final request = PaymentRequest(receiverId: 'merchant.near', token: usdcToken, amount: '1000000', id: newRequestId());
+      final longLived = await signVoucher(payer, [Transfer('merchant.near', {usdcToken: '1000000'}, memo: 'req:${request.id} seq:1 prev:00')],
+          now.add(const Duration(hours: 74)), makeNonce());
+      expect(refusal(longLived, a: a), 'deadline');
+      final usual = await signVoucher(payer, [Transfer('merchant.near', {usdcToken: '1000000'}, memo: 'req:${request.id} seq:1 prev:00')],
+          now.add(const Duration(hours: 72)), makeNonce());
+      expect(refusal(usual, a: a), isNull);
+    });
+
     test('refuses a payment over the cap however large the balance', () async {
       // The cap is what one bad voucher can cost a payee. 25 USDC is allowed, a cent more is not.
       expect(refusal(await pay('25000000'), a: attested('900000000')), isNull);

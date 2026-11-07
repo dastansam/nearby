@@ -1,6 +1,6 @@
 //! What the relayer needs from NEAR. A trait, so the settlement rules can be tested without a network.
 use crate::env;
-use crate::voucher::{tag, untag, IntentMessage, SignedVoucher, VERIFYING_CONTRACT};
+use crate::voucher::{tag, untag, SignedVoucher, VERIFYING_CONTRACT};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use ed25519_dalek::{Signer, SigningKey};
 use regex::Regex;
@@ -60,10 +60,15 @@ pub trait Chain: Send + Sync + 'static {
     fn execute(&self, v: &SignedVoucher) -> impl Future<Output = Result<String, ChainError>> + Send;
     /// yoctoNEAR backing the account's payments in the bond contract: "0" when there is none.
     fn bond_of(&self, account: &str) -> impl Future<Output = Result<String, ChainError>> + Send;
-    /// Hands a pair of equivocating vouchers to the bond contract, paying gas, and returns the
-    /// transaction hash. Refused if there is nothing to take from the key or the contract finds the
-    /// pair no proof.
-    fn slash(&self, a: &SignedVoucher, b: &SignedVoucher) -> impl Future<Output = Result<String, ChainError>> + Send;
+    /// Hands a pair of equivocating vouchers signed by `signer` to the bond contract, paying gas,
+    /// and returns the transaction hash. Refused if the key has nothing at stake or was slashed
+    /// already, or if the contract finds the pair no proof.
+    fn slash(
+        &self,
+        signer: &str,
+        a: &SignedVoucher,
+        b: &SignedVoucher,
+    ) -> impl Future<Output = Result<String, ChainError>> + Send;
 }
 
 /// The most gas one transaction may use; the call gets all of it and is charged only what it burns.
@@ -262,14 +267,21 @@ impl Chain for NearChain {
         self.yocto("bond_of", account).await
     }
 
-    async fn slash(&self, a: &SignedVoucher, b: &SignedVoucher) -> Result<String, ChainError> {
-        // A free view first: pairs are free to make for anyone with a key, and a transaction for a
-        // key with nothing to take would cost this relayer gas for nothing.
-        let signer = serde_json::from_str::<IntentMessage>(&a.payload.message)
-            .map(|m| m.signer_id)
-            .map_err(|_| ChainError::Refused("malformed".into()))?;
-        if self.yocto("at_stake", &signer).await? == "0" {
-            return Err(ChainError::Refused("nothing at stake".into()));
+    async fn slash(&self, signer: &str, a: &SignedVoucher, b: &SignedVoucher) -> Result<String, ChainError> {
+        // Free views first: pairs are free to make for anyone with a key, and a transaction for a
+        // key with nothing to take would cost this relayer gas for nothing. A key already banned
+        // was slashed by a transaction whose answer never reached us, or by someone else.
+        if self.yocto("at_stake", signer).await? == "0" {
+            let banned = self
+                .view(&self.bond_contract, "is_banned", json!({ "account": signer }))
+                .await
+                .map_err(ChainError::not_a_refusal)?;
+            let why = if banned.value == true {
+                "already slashed"
+            } else {
+                "nothing at stake"
+            };
+            return Err(ChainError::Refused(why.into()));
         }
         self.send(&self.bond_contract, "slash", json!({ "a": a, "b": b })).await
     }

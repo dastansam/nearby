@@ -32,6 +32,7 @@ struct Fake {
     block: u64,         // the height every view is answered at
     bond: &'static str, // yoctoNEAR the bond contract reports at stake for every account
     refuse_slash: Option<&'static str>,
+    no_answer_to_slashing: bool, // the slashing goes through, and the answer never comes back
     slashed: Vec<(SignedVoucher, SignedVoucher)>,
 }
 
@@ -52,6 +53,7 @@ impl FakeChain {
             block: BLOCK,
             bond: "5000000000000000000000000",
             refuse_slash: None,
+            no_answer_to_slashing: false,
             slashed: Vec::new(),
         };
         Arc::new(Self(Mutex::new(fake)))
@@ -115,8 +117,12 @@ impl Chain for FakeChain {
         Ok(self.reach().await?.bond.into())
     }
 
-    async fn slash(&self, a: &SignedVoucher, b: &SignedVoucher) -> Result<String, ChainError> {
+    async fn slash(&self, signer: &str, a: &SignedVoucher, b: &SignedVoucher) -> Result<String, ChainError> {
         let mut fake = self.reach().await?;
+        let banned = fake.slashed.iter().any(|(first, _)| account_of(first) == signer);
+        if banned {
+            return Err(ChainError::Refused("already slashed".into()));
+        }
         if fake.bond == "0" {
             return Err(ChainError::Refused("nothing at stake".into()));
         }
@@ -124,6 +130,9 @@ impl Chain for FakeChain {
             return Err(ChainError::Refused(why.into()));
         }
         fake.slashed.push((a.clone(), b.clone()));
+        if fake.no_answer_to_slashing {
+            return Err(ChainError::Unknown("timed out".into()));
+        }
         Ok(format!("slash{}", fake.slashed.len()))
     }
 }
@@ -144,6 +153,12 @@ fn payer() -> SigningKey {
 
 fn account(key: &SigningKey) -> String {
     implicit_account(key.verifying_key().as_bytes())
+}
+
+fn account_of(v: &SignedVoucher) -> String {
+    serde_json::from_str::<IntentMessage>(&v.payload.message)
+        .unwrap()
+        .signer_id
 }
 
 impl Default for Pay {
@@ -557,6 +572,27 @@ async fn a_pair_the_bond_contract_turns_down_is_kept_with_its_reason() {
         (proof.tx.as_deref(), proof.refusal.as_deref()),
         (None, Some("different sequence numbers"))
     );
+}
+
+// The slashing landed but its answer was lost. Sending it again would burn gas on a transaction the
+// contract must refuse, and record that refusal as if the key had never been slashed.
+#[tokio::test]
+async fn a_slashing_whose_answer_was_lost_is_recognised_rather_than_sent_again() {
+    let chain = FakeChain::new();
+    chain.state().no_answer_to_slashing = true;
+    let settler = Settler::new(chain.clone());
+    let (first, second) = pair();
+    settle(&settler, &[&first, &second]).await;
+    settle_down().await;
+    chain.state().no_answer_to_slashing = false;
+    settle(&settler, &[&second]).await;
+    settle_down().await;
+    let proof = &settler.equivocations().await[0];
+    assert_eq!(
+        (proof.tx.as_deref(), proof.refusal.as_deref()),
+        (None, Some("already slashed"))
+    );
+    assert_eq!(chain.state().slashed.len(), 1, "one transaction, not two");
 }
 
 // Pairs are free to make with a throwaway key; a transaction for each would cost the relayer gas.

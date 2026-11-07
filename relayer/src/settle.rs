@@ -197,10 +197,10 @@ impl<C: Chain> Settler<C> {
 
     /// Hands a pair to the bond contract, in a task of its own: the vouchers still go to
     /// intents.near meanwhile, and a slow slashing holds up nobody's settlement.
-    fn slash(&self, a: SignedVoucher, b: SignedVoucher) {
+    fn slash(&self, signer: String, a: SignedVoucher, b: SignedVoucher) {
         let (chain, state) = (Arc::clone(&self.chain), Arc::clone(&self.state));
         tokio::spawn(async move {
-            let result = chain.slash(&a, &b).await;
+            let result = chain.slash(&signer, &a, &b).await;
             let mut state = state.lock().await;
             let Some(proof) = state.equivocations.iter_mut().rfind(|p| p.b.signature == b.signature) else {
                 return;
@@ -223,7 +223,7 @@ impl<C: Chain> Settler<C> {
             expired,
         } = payment;
         if let Some((a, b)) = seq.and_then(|seq| state.note_sequence(&signer, &seq, &v)) {
-            self.slash(a, b);
+            self.slash(signer.clone(), a, b);
         }
         match self.ask_chain(state, &v, &signer, expired).await {
             Ok(outcome) => outcome,

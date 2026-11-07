@@ -54,14 +54,16 @@ pub struct Transfer {
     pub receiver_id: String,
     /// Token id -> amount, as decimal text.
     pub tokens: BTreeMap<String, String>,
+    /// Absent and null both mean none, as intents.near reads them.
     #[serde(default)]
-    pub memo: String,
+    pub memo: Option<String>,
 }
 
 impl Transfer {
     /// The payer's sequence number, from a memo such as "req:9f2c seq:17 prev:00".
     pub fn sequence(&self) -> Option<&str> {
         self.memo
+            .as_deref()?
             .split(' ')
             .find_map(|entry| entry.strip_prefix("seq:"))
             .filter(|seq| !seq.is_empty())
@@ -230,5 +232,9 @@ mod tests {
         let mut no_memo = message("seq:1");
         no_memo.intents[0].as_object_mut().unwrap().remove("memo");
         assert_eq!(transfer(&no_memo).unwrap().sequence(), None);
+        // intents.near takes "memo": null too, and a payee's phone would settle such a voucher.
+        let mut null_memo = message("seq:1");
+        null_memo.intents[0]["memo"] = Value::Null;
+        assert_eq!(transfer(&null_memo).unwrap().sequence(), None);
     }
 }
