@@ -31,6 +31,7 @@ class VoucherStore {
   final Database _db;
   // Sync, so listeners hear about a voucher before put() returns and in the order they were stored.
   final _puts = StreamController<StoredVoucher>.broadcast(sync: true);
+  final _outcomes = StreamController<StoredVoucher>.broadcast(sync: true);
   VoucherStore._(this._db);
 
   static Future<VoucherStore> open([String path = 'nearby.db']) async => VoucherStore._(
@@ -71,6 +72,10 @@ class VoucherStore {
   /// Each voucher as it is stored or claimed, so the mesh can offer it and the screen can show it.
   Stream<StoredVoucher> get puts => _puts.stream;
 
+  /// Each voucher as it stands after the relayer's answer about it is recorded, so a screen showing
+  /// it as pending can show it settled, or not.
+  Stream<StoredVoucher> get outcomes => _outcomes.stream;
+
   /// Stores a voucher under its signer and nonce. Returns false, changing nothing, if that slot
   /// is taken: the chain settles it once, so a voucher shown again is the same payment, not a
   /// second one, and a different voucher in the same slot means only one of the two can settle.
@@ -107,18 +112,14 @@ class VoucherStore {
   /// held and does not fetch it again. A voucher recorded as settled stays settled, and keeps the
   /// transaction, block and receipt it has; ones it lacks can still be filled in.
   Future<void> setOutcome(Map<String, dynamic> voucher, Outcome outcome,
-      {String? tx, int? block, Map<String, dynamic>? receipt}) {
-    final settled = outcome == Outcome.settled;
-    return _db.rawUpdate(
+      {String? tx, int? block, Map<String, dynamic>? receipt}) async {
+    final settled = outcome == Outcome.settled, key = voucherKey(voucher);
+    await _db.rawUpdate(
         "UPDATE vouchers SET outcome = CASE outcome WHEN 'settled' THEN outcome ELSE ? END, tx = COALESCE(tx, ?), "
         'settled_block = COALESCE(settled_block, ?), receipt = COALESCE(receipt, ?) WHERE key = ?',
-        [
-          outcome.name,
-          settled ? tx : null,
-          settled ? block : null,
-          settled && receipt != null ? jsonEncode(receipt) : null,
-          voucherKey(voucher),
-        ]);
+        [outcome.name, settled ? tx : null, settled ? block : null, settled && receipt != null ? jsonEncode(receipt) : null, key]);
+    final now = await get(key);
+    if (now != null) _outcomes.add(now);
   }
 
   /// Keeps [signed] as the attestation for [account] unless a newer one is already held.

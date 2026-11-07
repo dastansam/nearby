@@ -50,5 +50,15 @@ void main() {
     expect(find.text('Paid, pending settlement'), findsOneWidget);
     expect(await kindOf(ours), VoucherKind.received);
     expect(await kindOf(other), VoucherKind.relayed, reason: 'still only carried, not counted as this sale');
+
+    // With a signal, the gateway settles the payment at once (gateway.dart). The screen is still up,
+    // and the chain's word is the one check the offline guards cannot make: the merchant should see it
+    // before the customer leaves. The other customer's settlement is not this sale's.
+    await tester.runAsync(() => store.setOutcome(other, Outcome.settled, tx: 'tx0', block: 1));
+    await tester.pump();
+    expect(find.text('Paid, pending settlement'), findsOneWidget);
+    await tester.runAsync(() => store.setOutcome(ours, Outcome.failed));
+    await tester.pump();
+    expect(find.text('Paid, but the chain refused it'), findsOneWidget);
   });
 }

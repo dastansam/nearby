@@ -32,16 +32,14 @@ const _idsPerMessage = 1000;
 String gossipId(String voucherKey) => sha256.convert(utf8.encode(voucherKey)).toString().substring(0, 16);
 
 class Gossip {
-  Gossip(this._transport, this._store, {this.onChange, this.onSettled});
+  Gossip(this._transport, this._store, {this.onChange});
 
   final Transport _transport;
   final VoucherStore _store;
 
-  /// Called when a peer comes or goes, so the UI can refresh. (New vouchers show up on [VoucherStore.puts].)
+  /// Called when a peer comes or goes, so the UI can refresh. (New vouchers show up on
+  /// [VoucherStore.puts], settlements learned from peers on [VoucherStore.outcomes].)
   final void Function()? onChange;
-
-  /// Called when a receipt from a peer settles a voucher held here.
-  final void Function()? onSettled;
 
   final _peers = <String>{};
   StreamSubscription<void>? _puts;
@@ -128,7 +126,7 @@ class Gossip {
         // Only the relayer's own signature, over this very voucher, says it settled; a peer's word
         // would let anyone make a merchant drop a payment it is owed.
         final s = await _store.get(m['k'] as String);
-        if (s != null && await keepReceipt(_store, s.voucher, m['r'])) onSettled?.call();
+        if (s != null) await keepReceipt(_store, s.voucher, m['r']);
       case 'want':
         final forwardable = await _forwardable(), attested = <String>{};
         for (final id in (m['ids'] as List).cast<String>()) {

@@ -143,6 +143,19 @@ void main() {
         reason: 'the receipt is passed on to phones still carrying the voucher');
   });
 
+  test('tells listeners how a voucher stands once the relayer has answered', () async {
+    // The receive screen shows "pending" with the customer still there; this is how it learns better.
+    // What is told is the row as it stands, so a late "failed" cannot show over a settlement.
+    await store.put(voucher, VoucherKind.received);
+    final heard = <(Outcome?, String?)>[];
+    final sub = store.outcomes.listen((s) => heard.add((s.outcome, s.tx)));
+    addTearDown(sub.cancel);
+    await store.setOutcome(voucher, Outcome.settled, tx: 'tx1');
+    await store.setOutcome(voucher, Outcome.failed);
+    await store.setOutcome(await sign('other.near', makeNonce()), Outcome.failed); // not stored: nothing to tell
+    expect(heard, [(Outcome.settled, 'tx1'), (Outcome.settled, 'tx1')]);
+  });
+
   test('finds every voucher of one payer and nobody else\'s', () async {
     // The balance check subtracts what this payer has spent. Missing one overstates what they
     // have left; picking up a stranger's refuses an honest payer.

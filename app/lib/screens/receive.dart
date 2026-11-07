@@ -52,9 +52,10 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
   final _amount = TextEditingController();
   PaymentRequest? _request;
   bool _paid = false;
+  Outcome? _outcome; // the chain's answer about the payment, once this phone has a signal
   String? _rejection; // why the last scanned voucher was refused
   bool _scanning = false; // a second tap must not stack a second scanner
-  late final StreamSubscription<void> _mesh;
+  late final StreamSubscription<void> _mesh, _outcomes;
 
   @override
   void initState() {
@@ -65,6 +66,13 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       final request = _request;
       if (request == null || p.kind != VoucherKind.relayed || !namesRequest(p.voucher, request)) return;
       _show(await acceptPayment(widget.store, request, jsonEncode({'v': p.voucher})));
+    });
+    // With a signal, the gateway uploads the payment the moment it is stored, and the chain's answer
+    // beats the customer out of the door: the live check that the offline guards stand in for.
+    _outcomes = widget.store.outcomes.listen((s) {
+      final request = _request;
+      if (request == null || s.kind != VoucherKind.received || !namesRequest(s.voucher, request)) return;
+      setState(() => _outcome = s.outcome);
     });
   }
 
@@ -84,6 +92,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
   @override
   void dispose() {
     _mesh.cancel();
+    _outcomes.cancel();
     _amount.dispose();
     super.dispose();
   }
@@ -119,6 +128,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
   Widget build(BuildContext context) {
     final request = _request;
     final theme = Theme.of(context);
+    final refused = _outcome == Outcome.failed;
     return Scaffold(
       appBar: AppBar(title: const Text('Receive')),
       body: Padding(
@@ -138,12 +148,22 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                 Text(formatUsdc(request.amount), style: theme.textTheme.headlineMedium),
                 const SizedBox(height: 16),
                 if (_paid)
-                  Icon(Icons.check_circle, size: 160, color: theme.colorScheme.primary)
+                  Icon(refused ? Icons.error : Icons.check_circle,
+                      size: 160, color: refused ? theme.colorScheme.error : theme.colorScheme.primary)
                 else
                   QrImageView(key: ValueKey(request.encode()), data: request.encode(), size: 260, backgroundColor: Colors.white),
                 const SizedBox(height: 16),
                 if (_paid) ...[
-                  Text('Paid, pending settlement', style: theme.textTheme.titleLarge),
+                  Text(
+                      switch (_outcome) {
+                        Outcome.settled => 'Paid and settled on chain',
+                        Outcome.failed => 'Paid, but the chain refused it',
+                        null => 'Paid, pending settlement',
+                      },
+                      style: theme.textTheme.titleLarge?.copyWith(color: refused ? theme.colorScheme.error : null)),
+                  if (refused)
+                    const Text('The voucher is signed but intents.near will not pay it: do not hand over the goods.',
+                        textAlign: TextAlign.center),
                   // Said out loud: without a relayer key this build cannot tell a funded payer from an empty one.
                   if (relayerKey.isEmpty) const Text('The payer\'s balance was not checked: this build trusts no relayer'),
                 ]
