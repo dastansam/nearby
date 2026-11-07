@@ -2,8 +2,8 @@
 //! signature, balances are public, and an attestation is only as good as the relayer's signature on it.
 use crate::attestation::{sign_attestation, Attestation};
 use crate::chain::Chain;
-use crate::settle::Settler;
-use crate::voucher::{iso, tag, SignedVoucher, USDC_TOKEN};
+use crate::settle::{Proof, Settler};
+use crate::voucher::{iso, tag, USDC_TOKEN};
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -84,23 +84,26 @@ async fn attest<C: Chain>(State(relayer): State<Arc<Relayer<C>>>, Path(account):
     if account.len() != 64 || !account.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
         return refuse(StatusCode::BAD_REQUEST, "not an implicit account");
     }
-    match relayer.chain.balance_of(&account, USDC_TOKEN).await {
-        Ok(read) => {
-            let attestation = Attestation {
-                account,
-                token: USDC_TOKEN.into(),
-                balance: read.value,
-                bond: "0".into(), // no bond contract yet
-                as_of: iso((relayer.now)()),
-                block: read.block,
-            };
-            Json(sign_attestation(&relayer.attestation_key, &attestation)).into_response()
-        }
-        Err(e) => refuse(StatusCode::INTERNAL_SERVER_ERROR, e.reason()),
-    }
+    let asked = tokio::try_join!(
+        relayer.chain.balance_of(&account, USDC_TOKEN),
+        relayer.chain.bond_of(&account)
+    );
+    let (read, bond) = match asked {
+        Ok(answers) => answers,
+        Err(e) => return refuse(StatusCode::INTERNAL_SERVER_ERROR, e.reason()),
+    };
+    let attestation = Attestation {
+        account,
+        token: USDC_TOKEN.into(),
+        balance: read.value,
+        bond,
+        as_of: iso((relayer.now)()),
+        block: read.block,
+    };
+    Json(sign_attestation(&relayer.attestation_key, &attestation)).into_response()
 }
 
-/// Proofs of double-spending seen so far, for whoever submits them to the bond contract.
-async fn equivocations<C: Chain>(State(relayer): State<Arc<Relayer<C>>>) -> Json<Vec<(SignedVoucher, SignedVoucher)>> {
+/// Proofs of double-spending seen so far, with the slashing transaction each one led to.
+async fn equivocations<C: Chain>(State(relayer): State<Arc<Relayer<C>>>) -> Json<Vec<Proof>> {
     Json(relayer.settler.equivocations().await)
 }

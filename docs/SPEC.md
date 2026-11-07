@@ -10,6 +10,8 @@ Local copy of the living spec at https://claude.ai/artifact/WL5vbTkHi7PiMb4KZXe9
 
 **This file is newer on the relayer's language (2026-11-06).** The relayer is written in Rust (axum, plain JSON-RPC to NEAR), not TypeScript. Its HTTP API and signed formats are unchanged.
 
+**This file is newer on the bond (2026-11-07).** The bond is NEAR, not USDC: `bond_for(account)` takes an attached deposit from anyone (the offline account holds only tokens inside intents.near), `unbond` then `withdraw` after 4 days (the 72 h voucher deadline plus relay time), and `bond_of` reports 0 while unbonding so payees stop trusting it at once. `slash(a, b)` recomputes both NEP-413 hashes, checks both signatures with `env::ed25519_verify`, requires one key, one sequence number and two different hashes, pays the bond half to each voucher's receiver (the contract cannot know which merchant was cheated) and bans the key. A key with nothing at stake is turned away rather than banned, so throwaway keys cannot run up the contract's storage; the pair stays valid for the day the key bonds. The relayer checks `at_stake` (a free view) and submits pairs as it finds them, retrying after an outage on the next upload, and publishes the slashing transaction or the refusal at `GET /equivocations`. Payees require a bond of at least 5 NEAR (app constant `minimumBondNear`), which answers the open question below on bond size with a policy knob rather than "equal to the budget": the two are in different currencies.
+
 We ship a Flutter app that pays with no internet. The payer signs a NEAR transfer on the phone, nearby phones relay it hop by hop over Bluetooth, and the first phone with a signal settles it on NEAR. Deadline: Nov 14, 23:59 UTC, 9 days from today.
 
 ## Overview

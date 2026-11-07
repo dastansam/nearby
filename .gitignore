@@ -7,7 +7,7 @@ app/.packages
 .idea/
 
 # Rust
-relayer/target/
+target/
 relayer/.env
 
 # Keys, and signed vouchers: anyone holding one can submit it

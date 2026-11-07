@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["bond", "relayer", "voucher"]
+# The contract builds only for wasm (`cargo near build`) or for its own tests (`cargo test -p nearby-bond`).
+default-members = ["relayer", "voucher"]
+
+# The bond contract, for size: `cargo near build non-reproducible-wasm --no-abi --profile contract`.
+[profile.contract]
+inherits = "release"
+codegen-units = 1
+opt-level = "z"
+lto = true
+overflow-checks = true

@@ -1,10 +1,10 @@
 //! Settling uploaded vouchers, and noticing when a payer has signed two for one sequence number.
 use crate::chain::{Chain, ChainError};
-use crate::voucher::{verify_voucher, Checked, SignedVoucher, USDC_TOKEN};
+use crate::voucher::{transfer, verify_voucher, Checked, SignedVoucher, USDC_TOKEN};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -59,9 +59,33 @@ const REFUSAL_TTL: Duration = Duration::from_secs(60);
 /// The first may still land; a second one sent meanwhile fails on chain and its gas is wasted.
 const IN_FLIGHT: Duration = Duration::from_secs(120);
 
-/// Proofs kept. They are free to make for anyone with a key, and only until the bond contract
-/// exists is every signer's worth keeping.
+/// Proofs kept. They are free to make for anyone with a key.
 const MAX_PROOFS: usize = 10_000;
+
+/// Two vouchers one payer signed with the same sequence number, and what the bond contract made of
+/// them. Neither `tx` nor `refusal` means the contract has not answered yet: the pair goes to it
+/// again the next time `b` is uploaded.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct Proof {
+    pub a: SignedVoucher,
+    pub b: SignedVoucher,
+    /// The slashing transaction, once it has run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx: Option<String>,
+    /// Why the pair was not slashed, when the chain gave a final answer: nothing at stake, or the
+    /// contract found it no proof.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
+    /// A slashing is on its way to the chain.
+    #[serde(skip)]
+    pending: bool,
+}
+
+impl Proof {
+    fn answered(&self) -> bool {
+        self.tx.is_some() || self.refusal.is_some()
+    }
+}
 
 /// A map that forgets its oldest entry once full. These are fed by anyone who can sign.
 struct Remembered<V> {
@@ -100,9 +124,8 @@ struct State {
     in_flight: Remembered<Instant>,
     /// "signer:seq" -> the first voucher seen with that sequence number.
     by_seq: Remembered<SignedVoucher>,
-    equivocations: Vec<(SignedVoucher, SignedVoucher)>,
-    /// Signatures of the second voucher of each pair, so no pair is recorded twice.
-    paired: HashSet<String>,
+    /// In the order found. A pair is known by the signature of its second voucher.
+    equivocations: Vec<Proof>,
 }
 
 /// A voucher this relayer settles: validly signed, and one USDC transfer.
@@ -120,23 +143,11 @@ fn admit(input: &Value) -> Result<Payment, &'static str> {
     let v = SignedVoucher::deserialize(input).map_err(|_| "malformed")?;
     let Checked { message, expired } = verify_voucher(&v, Utc::now())?;
     // The relayer pays gas for NearBy payments (one USDC transfer), not for whatever else someone signs.
-    let [intent] = message.intents.as_slice() else {
-        return Err("intents");
-    };
-    let usdc_only = intent["tokens"]
-        .as_object()
-        .is_some_and(|tokens| tokens.len() == 1 && tokens.contains_key(USDC_TOKEN));
-    if intent["intent"] != "transfer" || !usdc_only {
-        return Err("intents");
-    }
-    // The memo is a space-separated list of entries such as "req:9f2c seq:17 prev:00".
-    let memo = intent["memo"].as_str().unwrap_or_default();
-    let seq = memo
-        .split(' ')
-        .find_map(|entry| entry.strip_prefix("seq:"))
-        .filter(|seq| !seq.is_empty());
+    let payment = transfer(&message)
+        .filter(|t| t.tokens.len() == 1 && t.tokens.contains_key(USDC_TOKEN))
+        .ok_or("intents")?;
     Ok(Payment {
-        seq: seq.map(String::from),
+        seq: payment.sequence().map(String::from),
         signer: message.signer_id,
         expired,
         v,
@@ -145,7 +156,7 @@ fn admit(input: &Value) -> Result<Payment, &'static str> {
 
 pub struct Settler<C> {
     chain: Arc<C>,
-    state: Mutex<State>,
+    state: Arc<Mutex<State>>,
 }
 
 impl<C: Chain> Settler<C> {
@@ -156,11 +167,10 @@ impl<C: Chain> Settler<C> {
             in_flight: Remembered::new(),
             by_seq: Remembered::new(),
             equivocations: Vec::new(),
-            paired: HashSet::new(),
         };
         Self {
             chain,
-            state: Mutex::new(state),
+            state: Arc::new(Mutex::new(state)),
         }
     }
 
@@ -181,8 +191,28 @@ impl<C: Chain> Settler<C> {
     }
 
     /// Pairs of vouchers one payer signed with the same sequence number: proof of double-spending.
-    pub async fn equivocations(&self) -> Vec<(SignedVoucher, SignedVoucher)> {
+    pub async fn equivocations(&self) -> Vec<Proof> {
         self.state.lock().await.equivocations.clone()
+    }
+
+    /// Hands a pair to the bond contract, in a task of its own: the vouchers still go to
+    /// intents.near meanwhile, and a slow slashing holds up nobody's settlement.
+    fn slash(&self, a: SignedVoucher, b: SignedVoucher) {
+        let (chain, state) = (Arc::clone(&self.chain), Arc::clone(&self.state));
+        tokio::spawn(async move {
+            let result = chain.slash(&a, &b).await;
+            let mut state = state.lock().await;
+            let Some(proof) = state.equivocations.iter_mut().rfind(|p| p.b.signature == b.signature) else {
+                return;
+            };
+            proof.pending = false;
+            match result {
+                Ok(tx) => proof.tx = Some(tx),
+                Err(ChainError::Refused(why)) => proof.refusal = Some(why),
+                // Nothing is known: the next upload of the voucher sends the pair again.
+                Err(ChainError::Unknown(_)) => {}
+            }
+        });
     }
 
     async fn one(&self, state: &mut State, payment: Payment) -> Outcome {
@@ -192,8 +222,8 @@ impl<C: Chain> Settler<C> {
             seq,
             expired,
         } = payment;
-        if let Some(seq) = seq {
-            state.note_sequence(&signer, &seq, &v);
+        if let Some((a, b)) = seq.and_then(|seq| state.note_sequence(&signer, &seq, &v)) {
+            self.slash(a, b);
         }
         match self.ask_chain(state, &v, &signer, expired).await {
             Ok(outcome) => outcome,
@@ -286,20 +316,37 @@ impl<C: Chain> Settler<C> {
 
 impl State {
     /// Both vouchers of a pair still go to the chain, which settles whichever the balance allows.
-    fn note_sequence(&mut self, signer: &str, seq: &str, v: &SignedVoucher) {
+    /// Returns the pair to hand to the bond contract, when there is one it has not answered about.
+    fn note_sequence(&mut self, signer: &str, seq: &str, v: &SignedVoucher) -> Option<(SignedVoucher, SignedVoucher)> {
         let slot = format!("{signer}:{seq}");
-        match self.by_seq.entries.get(&slot) {
-            None => self.by_seq.insert(slot, v.clone()),
-            // Compared by signature: two different vouchers may even share a nonce, and only the payer
-            // can produce a signature, so nobody else can make a real pair look already recorded.
-            Some(first)
-                if first.signature != v.signature
-                    && self.equivocations.len() < MAX_PROOFS
-                    && self.paired.insert(v.signature.clone()) =>
-            {
-                self.equivocations.push((first.clone(), v.clone()));
-            }
-            Some(_) => {}
+        let Some(first) = self.by_seq.entries.get(&slot) else {
+            self.by_seq.insert(slot, v.clone());
+            return None;
+        };
+        // Compared by signature: two different vouchers may even share a nonce, and only the payer
+        // can produce a signature, so nobody else can make a real pair look already recorded.
+        if first.signature == v.signature {
+            return None;
         }
+        let known = self.equivocations.iter().rposition(|p| p.b.signature == v.signature);
+        let proof = match known {
+            Some(at) => &mut self.equivocations[at],
+            None if self.equivocations.len() < MAX_PROOFS => {
+                self.equivocations.push(Proof {
+                    a: first.clone(),
+                    b: v.clone(),
+                    tx: None,
+                    refusal: None,
+                    pending: false,
+                });
+                self.equivocations.last_mut().expect("just pushed")
+            }
+            None => return None,
+        };
+        if proof.answered() || proof.pending {
+            return None;
+        }
+        proof.pending = true;
+        Some((proof.a.clone(), proof.b.clone()))
     }
 }

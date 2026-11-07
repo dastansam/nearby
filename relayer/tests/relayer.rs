@@ -29,10 +29,13 @@ struct Fake {
     lagging: bool,                // the node answering views has not seen what was just executed
     lookups: usize,               // calls made
     executed: Vec<SignedVoucher>,
-    block: u64, // the height every view is answered at
+    block: u64,         // the height every view is answered at
+    bond: &'static str, // yoctoNEAR the bond contract reports at stake for every account
+    refuse_slash: Option<&'static str>,
+    slashed: Vec<(SignedVoucher, SignedVoucher)>,
 }
 
-/// A stand-in for intents.near.
+/// A stand-in for intents.near and the bond contract.
 struct FakeChain(Mutex<Fake>);
 
 impl FakeChain {
@@ -47,6 +50,9 @@ impl FakeChain {
             lookups: 0,
             executed: Vec::new(),
             block: BLOCK,
+            bond: "5000000000000000000000000",
+            refuse_slash: None,
+            slashed: Vec::new(),
         };
         Arc::new(Self(Mutex::new(fake)))
     }
@@ -104,6 +110,22 @@ impl Chain for FakeChain {
         fake.down = fake.fails_after_executing;
         Ok(format!("tx{}", fake.executed.len()))
     }
+
+    async fn bond_of(&self, _account: &str) -> Result<String, ChainError> {
+        Ok(self.reach().await?.bond.into())
+    }
+
+    async fn slash(&self, a: &SignedVoucher, b: &SignedVoucher) -> Result<String, ChainError> {
+        let mut fake = self.reach().await?;
+        if fake.bond == "0" {
+            return Err(ChainError::Refused("nothing at stake".into()));
+        }
+        if let Some(why) = fake.refuse_slash {
+            return Err(ChainError::Refused(why.into()));
+        }
+        fake.slashed.push((a.clone(), b.clone()));
+        Ok(format!("slash{}", fake.slashed.len()))
+    }
 }
 
 /// A payment to sign. The defaults are an ordinary NearBy payment from `payer()`.
@@ -156,10 +178,35 @@ fn pay() -> SignedVoucher {
     Pay::default().sign()
 }
 
+/// Two payments by `payer()` to two merchants with one sequence number: a double-spend.
+fn pair() -> (SignedVoucher, SignedVoucher) {
+    let numbered = |to| {
+        Pay {
+            to,
+            memo: Some("seq:4 prev:00"),
+            ..Pay::default()
+        }
+        .sign()
+    };
+    (numbered("merchant.near"), numbered("other.near"))
+}
+
 /// Uploads vouchers as a phone sends them: as JSON.
 async fn settle(settler: &Settler<FakeChain>, vouchers: &[&SignedVoucher]) -> Vec<Outcome> {
     let uploaded: Vec<Value> = vouchers.iter().map(|v| json!(v)).collect();
     settler.settle(&uploaded).await
+}
+
+/// The pairs recorded so far, without what the bond contract made of them.
+async fn pairs(settler: &Settler<FakeChain>) -> Vec<(SignedVoucher, SignedVoucher)> {
+    settler.equivocations().await.into_iter().map(|p| (p.a, p.b)).collect()
+}
+
+/// Lets the settler's background tasks (slashing) run to completion.
+async fn settle_down() {
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
 }
 
 fn settled(tx: Option<&str>, block: Option<u64>) -> Outcome {
@@ -454,12 +501,79 @@ async fn two_vouchers_with_the_same_sequence_number_are_kept_as_proof_and_both_s
     )
     .await;
     settle(&settler, &[&second, &second, &first]).await;
-    assert_eq!(settler.equivocations().await, [(first, second)]);
+    assert_eq!(pairs(&settler).await, [(first, second)]);
     assert_eq!(
         chain.state().executed.len(),
         3,
         "the chain decides which of the pair the balance covers"
     );
+}
+
+// Layer 3 of the double-spend model: the proof costs the cheat their bond, without anyone having to
+// collect pairs from the relayer and submit them by hand.
+#[tokio::test]
+async fn a_pair_goes_to_the_bond_contract_and_the_slashing_transaction_is_published() {
+    let chain = FakeChain::new();
+    let settler = Settler::new(chain.clone());
+    let (first, second) = pair();
+    settle(&settler, &[&first, &second]).await;
+    settle_down().await;
+    assert_eq!(chain.state().slashed, [(first, second)]);
+    assert_eq!(settler.equivocations().await[0].tx.as_deref(), Some("slash1"));
+}
+
+// The relayer could not reach the chain; nothing is known. The pair must not be lost, and the
+// next gateway to carry the voucher gives it another go.
+#[tokio::test]
+async fn a_slashing_lost_to_an_outage_is_sent_again_with_the_next_upload() {
+    let chain = FakeChain::new();
+    let settler = Settler::new(chain.clone());
+    let (first, second) = pair();
+    settle(&settler, &[&first]).await;
+    chain.state().down = true;
+    settle(&settler, &[&second]).await;
+    settle_down().await;
+    let proof = &settler.equivocations().await[0];
+    assert_eq!((proof.tx.as_deref(), proof.refusal.as_deref()), (None, None));
+    chain.state().down = false;
+    settle(&settler, &[&second]).await;
+    settle_down().await;
+    assert_eq!(settler.equivocations().await[0].tx.as_deref(), Some("slash1"));
+    assert_eq!(chain.state().slashed.len(), 1);
+}
+
+// The relayer believed the pair was proof and the contract did not: a bug in one of them, or an
+// attack on the check. Either way the operator must see it, not lose it.
+#[tokio::test]
+async fn a_pair_the_bond_contract_turns_down_is_kept_with_its_reason() {
+    let chain = FakeChain::new();
+    chain.state().refuse_slash = Some("different sequence numbers");
+    let settler = Settler::new(chain.clone());
+    let (first, second) = pair();
+    settle(&settler, &[&first, &second]).await;
+    settle_down().await;
+    let proof = &settler.equivocations().await[0];
+    assert_eq!(
+        (proof.tx.as_deref(), proof.refusal.as_deref()),
+        (None, Some("different sequence numbers"))
+    );
+}
+
+// Pairs are free to make with a throwaway key; a transaction for each would cost the relayer gas.
+#[tokio::test]
+async fn a_pair_from_a_key_with_nothing_at_stake_is_kept_but_not_sent() {
+    let chain = FakeChain::new();
+    chain.state().bond = "0";
+    let settler = Settler::new(chain.clone());
+    let (first, second) = pair();
+    settle(&settler, &[&first, &second]).await;
+    settle_down().await;
+    let proof = &settler.equivocations().await[0];
+    assert_eq!(
+        (proof.tx.as_deref(), proof.refusal.as_deref()),
+        (None, Some("nothing at stake"))
+    );
+    assert!(chain.state().slashed.is_empty());
 }
 
 #[tokio::test]
@@ -481,7 +595,7 @@ async fn an_expired_voucher_is_not_settled_but_still_counts_as_half_of_a_proof()
     }
     .sign();
     assert_eq!(settle(&settler, &[&first, &late]).await[1], invalid("expired"));
-    assert_eq!(settler.equivocations().await, [(first.clone(), late)]);
+    assert_eq!(pairs(&settler).await, [(first.clone(), late)]);
     assert_eq!(chain.state().executed, [first]);
 }
 
@@ -515,7 +629,7 @@ async fn a_pair_that_reuses_the_nonce_as_well_as_the_sequence_number_is_still_pr
     }
     .sign();
     settle(&settler, &[&first, &second]).await;
-    assert_eq!(settler.equivocations().await, [(first, second)]);
+    assert_eq!(pairs(&settler).await, [(first, second)]);
 }
 
 #[tokio::test]
@@ -546,7 +660,7 @@ async fn someone_elses_pair_cannot_make_a_real_proof_look_already_recorded() {
     }
     .sign();
     settle(&settler, &[&first, &second]).await;
-    assert_eq!(settler.equivocations().await[1], (first, second));
+    assert_eq!(pairs(&settler).await[1], (first, second));
 }
 
 #[tokio::test]
@@ -561,7 +675,7 @@ async fn the_same_voucher_respelled_is_not_a_second_voucher() {
     let mut respelled = v.clone();
     respelled.signature = v.signature.replace("ed25519:", "");
     assert_eq!(settle(&settler, &[&v, &respelled]).await[1], invalid("malformed"));
-    assert_eq!(settler.equivocations().await, []);
+    assert_eq!(pairs(&settler).await, []);
 }
 
 #[tokio::test]
@@ -585,7 +699,7 @@ async fn the_same_sequence_number_from_two_different_payers_is_not_a_double_spen
         ],
     )
     .await;
-    assert_eq!(settler.equivocations().await, []);
+    assert_eq!(pairs(&settler).await, []);
 }
 
 // ---- over HTTP
@@ -679,8 +793,13 @@ async fn an_attestation_is_the_chain_balance_signed_by_the_relayers_published_ke
     let payload = signed["payload"].as_str().unwrap();
     assert_eq!(
         serde_json::from_str::<Value>(payload).unwrap(),
-        json!({ "account": signer, "token": USDC_TOKEN, "balance": "25000000", "bond": "0", "as_of": AT, "block": BLOCK })
+        json!({ "account": signer, "token": USDC_TOKEN, "balance": "25000000", "bond": "5000000000000000000000000", "as_of": AT, "block": BLOCK })
     );
+    // A payee reads the bond off the attestation: with none, there is nothing to lose by cheating.
+    chain.state().bond = "0";
+    let (_, unbonded) = request(&chain, "GET", &format!("/attestation/{signer}"), None).await;
+    let unbonded: Value = serde_json::from_str(unbonded["payload"].as_str().unwrap()).unwrap();
+    assert_eq!(unbonded["bond"], "0");
     let (_, about) = request(&chain, "GET", "/", None).await;
     assert_eq!(
         about["attestation_key"],
@@ -715,29 +834,20 @@ async fn no_attestation_for_something_that_is_not_an_offline_account_or_when_the
 
 #[tokio::test]
 async fn proofs_of_double_spending_are_published_as_pairs_of_vouchers() {
-    // Whoever submits them to the bond contract needs both vouchers exactly as signed.
+    // Both vouchers exactly as signed, so anyone can check the proof, and the slashing transaction.
     let chain = FakeChain::new();
-    let first = Pay {
-        memo: Some("seq:4 prev:00"),
-        ..Pay::default()
-    }
-    .sign();
-    let second = Pay {
-        to: "other.near",
-        memo: Some("seq:4 prev:00"),
-        ..Pay::default()
-    }
-    .sign();
+    let (first, second) = pair();
     let app = router(chain.clone(), attestation_key(), now);
     let upload = Request::post("/vouchers")
         .header("content-type", "application/json")
         .body(Body::from(json!({ "vouchers": [first, second] }).to_string()))
         .unwrap();
     app.clone().oneshot(upload).await.unwrap();
+    settle_down().await;
     let response = app
         .oneshot(Request::get("/equivocations").body(Body::empty()).unwrap())
         .await
         .unwrap();
     let published: Value = serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(published, json!([[first, second]]));
+    assert_eq!(published, json!([{ "a": first, "b": second, "tx": "slash1" }]));
 }

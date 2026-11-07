@@ -2,6 +2,7 @@
 import 'dart:convert';
 
 import 'package:cryptography/cryptography.dart';
+import 'package:nearby/voucher/guards.dart';
 import 'package:nearby/voucher/nep413.dart';
 import 'package:nearby/voucher/payment.dart';
 
@@ -9,13 +10,14 @@ import 'package:nearby/voucher/payment.dart';
 Future<String> publicKeyOf(SimpleKeyPair key) async => tag((await key.extractPublicKey()).bytes);
 
 /// What relayer/src/attestation.rs signs; testdata/attestation-vector.json pins the format.
+/// [bond] defaults to just enough: most tests are about the balance.
 Future<Map<String, dynamic>> signAttestation(SimpleKeyPair relayer, String account, String balance,
-    {DateTime? asOf, int block = 1000}) async {
+    {DateTime? asOf, int block = 1000, BigInt? bond}) async {
   final payload = jsonEncode({
     'account': account,
     'token': usdcToken,
     'balance': balance,
-    'bond': '0',
+    'bond': (bond ?? minimumBond).toString(),
     'as_of': (asOf ?? DateTime.now()).toUtc().toIso8601String(),
     'block': block,
   });

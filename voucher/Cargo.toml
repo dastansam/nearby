@@ -1,0 +1,21 @@
+[package]
+name = "voucher"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "NearBy vouchers: NEP-413 signed transfer intents, as read by the relayer and the bond contract"
+
+[features]
+# Signing vouchers, for the relayer and for tests. Off in the contract, which only checks them.
+sign = ["dep:ed25519-dalek", "dep:rand"]
+
+[dependencies]
+base64 = "0.22"
+bs58 = "0.5"
+ed25519-dalek = { version = "2", optional = true }
+hex = "0.4"
+rand = { version = "0.8", optional = true }
+serde = { version = "1", features = ["derive"] }
+# preserve_order: a voucher's message is signed as JSON text, so its keys must stay in the order given.
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"

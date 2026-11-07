@@ -40,8 +40,14 @@ void main() {
   StoredVoucher seen(Map<String, dynamic> v, {Outcome? outcome, int? settledBlock}) =>
       (kind: VoucherKind.relayed, hops: 1, voucher: v, outcome: outcome, tx: null, settledBlock: settledBlock);
 
-  Attestation attested(String balance, {DateTime? asOf, String? account}) =>
-      (account: account ?? payerId, token: usdcToken, balance: BigInt.parse(balance), asOf: asOf ?? readAt, block: readBlock);
+  Attestation attested(String balance, {DateTime? asOf, String? account, BigInt? bond}) => (
+        account: account ?? payerId,
+        token: usdcToken,
+        balance: BigInt.parse(balance),
+        bond: bond ?? minimumBond,
+        asOf: asOf ?? readAt,
+        block: readBlock
+      );
 
   String? refusal(Map<String, dynamic> v, {Attestation? a, List<StoredVoucher> theirs = const []}) =>
       checkGuards(v, attestation: a, theirs: theirs, now: now);
@@ -118,6 +124,15 @@ void main() {
       final v = await pay('2500000');
       expect(refusal(v, a: attested('3000000', asOf: now.subtract(const Duration(hours: 25)))), 'stale');
       expect(refusal(v, a: attested('3000000', asOf: now.subtract(const Duration(hours: 23)))), isNull);
+    });
+
+    // Layer 3: without a bond, a double-spend costs the payer nothing but a key. The relayer
+    // reports 0 for a key that is banned or whose bond is being withdrawn, so this covers those too.
+    test('refuses a payer who has not bonded enough NEAR against cheating', () async {
+      final v = await pay('2500000');
+      expect(refusal(v, a: attested('3000000', bond: minimumBond - BigInt.one)), 'bond');
+      expect(refusal(v, a: attested('3000000', bond: BigInt.zero)), 'bond');
+      expect(refusal(v, a: attested('3000000', bond: minimumBond)), isNull);
     });
 
     test('refuses a payment over the cap however large the balance', () async {

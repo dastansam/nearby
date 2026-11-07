@@ -22,7 +22,9 @@ const _domain = 'NearBy balance attestation v1\n';
 
 /// [asOf] is the relayer's clock, for how long the statement is good. [block] is the height the
 /// balance was read at, for what it includes: every payment settled by that block, and none after.
-typedef Attestation = ({String account, String token, BigInt balance, DateTime asOf, int block});
+/// [bond] is the yoctoNEAR locked in the bond contract against the payer cheating: what a
+/// double-spend costs them, over and above the key.
+typedef Attestation = ({String account, String token, BigInt balance, BigInt bond, DateTime asOf, int block});
 
 /// Whether [a] is too old to accept payments against.
 bool isStale(Attestation a, DateTime now) => a.asOf.add(attestationLifetime).isBefore(now);
@@ -39,6 +41,7 @@ Future<Attestation?> readAttestation(dynamic signed) async {
       account: a['account'] as String,
       token: a['token'] as String,
       balance: BigInt.parse(a['balance']),
+      bond: BigInt.parse(a['bond']),
       asOf: DateTime.parse(a['as_of']),
       block: a['block'] as int,
     );

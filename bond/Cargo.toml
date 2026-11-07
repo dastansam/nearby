@@ -1,0 +1,21 @@
+[package]
+name = "nearby-bond"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "NearBy bond contract: payers lock a bond, a pair of equivocating vouchers slashes it and bans the key"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+near-sdk = "5"
+voucher = { path = "../voucher" }
+
+[dev-dependencies]
+ed25519-dalek = "2"
+near-sdk = { version = "5", features = ["unit-testing"] }
+rand = "0.8"
+serde_json = "1"
+voucher = { path = "../voucher", features = ["sign"] }
+
