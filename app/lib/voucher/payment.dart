@@ -1,6 +1,7 @@
 // Payment requests (payee -> payer QR), signing a voucher for one, and the payee's offline checks.
 import 'dart:convert';
 
+import 'package:convert/convert.dart';
 import 'package:cryptography/cryptography.dart';
 
 import 'nep413.dart';
@@ -34,25 +35,37 @@ String formatUsdc(String units) {
   return '$whole.$frac USDC';
 }
 
+final _requestId = RegExp(r'^[0-9a-f]{16}$');
+
+String newRequestId() => hex.encode(makeNonce().sublist(0, 8));
+
 /// What the payee asks for. Shown as a QR; the payer signs a voucher that matches it.
 class PaymentRequest {
   final String receiverId;
   final String token;
   final String amount; // token base units
 
-  const PaymentRequest({required this.receiverId, required this.token, required this.amount});
+  /// Random per request ([newRequestId]). The payer signs it into the voucher's memo, so a voucher
+  /// that arrives over the mesh can be matched to the request on screen: see [namesRequest].
+  final String id;
 
-  String encode() => jsonEncode({'receiver_id': receiverId, 'token': token, 'amount': amount});
+  const PaymentRequest({required this.receiverId, required this.token, required this.amount, required this.id});
+
+  /// The memo entry that names this request. The memo is a space-separated list, so the
+  /// double-spend guards can add their own entries next to it.
+  String get memoTag => 'req:$id';
+
+  String encode() => jsonEncode({'receiver_id': receiverId, 'token': token, 'amount': amount, 'id': id});
 
   /// Null if [qr] is not a payment request this app can pay. Only USDC for now: every screen
   /// shows amounts as USDC, so another token would put a misleading number in front of the payer.
   static PaymentRequest? decode(String qr) {
     try {
       final j = jsonDecode(qr) as Map<String, dynamic>;
-      final amount = j['amount'] as String;
+      final amount = j['amount'] as String, id = j['id'] as String;
       // Plain positive decimal only: the contract parses it as u128, and BigInt.parse takes "0x10" or "+5".
-      if (j['token'] != usdcToken || !RegExp(r'^[1-9]\d*$').hasMatch(amount)) return null;
-      return PaymentRequest(receiverId: j['receiver_id'] as String, token: usdcToken, amount: amount);
+      if (j['token'] != usdcToken || !RegExp(r'^[1-9]\d*$').hasMatch(amount) || !_requestId.hasMatch(id)) return null;
+      return PaymentRequest(receiverId: j['receiver_id'] as String, token: usdcToken, amount: amount, id: id);
     } catch (_) {
       return null;
     }
@@ -62,7 +75,7 @@ class PaymentRequest {
 /// Payer side, offline: sign a voucher that pays exactly [request].
 Future<Map<String, dynamic>> signPayment(SimpleKeyPair key, PaymentRequest request) => signVoucher(
     key,
-    [Transfer(request.receiverId, {request.token: request.amount})],
+    [Transfer(request.receiverId, {request.token: request.amount}, memo: request.memoTag)],
     DateTime.now().add(_voucherLifetime),
     makeNonce());
 
@@ -81,7 +94,8 @@ Future<({Map<String, dynamic>? voucher, String? reason})> checkPayment(String qr
     if (reason != null) return (voucher: null, reason: reason);
     // One transfer, to us, of exactly this token and amount, and nothing else: rebuild the
     // message we would sign for this request and require the payer's to be identical. Only the
-    // deadline and the memo are the payer's to choose.
+    // deadline and the memo are the payer's to choose. Which request the memo names is not checked
+    // here: a payee who re-enters the amount must still be able to take the voucher already signed.
     final message = v['payload']['message'] as String;
     final msg = jsonDecode(message);
     final memo = msg['intents'][0]['memo'];
@@ -93,6 +107,19 @@ Future<({Map<String, dynamic>? voucher, String? reason})> checkPayment(String qr
     return message == expected ? (voucher: v, reason: null) : (voucher: null, reason: 'mismatch');
   } catch (_) {
     return (voucher: null, reason: 'malformed');
+  }
+}
+
+/// Whether [v] was signed for [request] and no other, going by its memo. This is what lets a
+/// voucher that arrives by radio mark a request as paid: nobody is holding up a phone, and two
+/// customers paying the same amount are otherwise indistinguishable. A voucher naming two
+/// requests counts for neither, or one payment could satisfy two tills.
+bool namesRequest(Map<String, dynamic> v, PaymentRequest request) {
+  try {
+    final memo = jsonDecode(v['payload']['message'])['intents'][0]['memo'];
+    return memo is String && memo.split(' ').where((e) => e.startsWith('req:')).join(' ') == request.memoTag;
+  } catch (_) {
+    return false;
   }
 }
 

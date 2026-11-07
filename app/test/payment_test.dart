@@ -8,7 +8,8 @@ import 'package:nearby/voucher/nep413.dart';
 import 'package:nearby/voucher/payment.dart';
 
 void main() {
-  const request = PaymentRequest(receiverId: 'merchant.near', token: usdcToken, amount: '2500000');
+  const requestId = '9f2c4e1a7b3d5560';
+  const request = PaymentRequest(receiverId: 'merchant.near', token: usdcToken, amount: '2500000', id: requestId);
   final now = DateTime.utc(2026, 11, 6, 12);
   late SimpleKeyPair payer;
 
@@ -20,8 +21,9 @@ void main() {
     List<Transfer>? intents,
     DateTime? deadline,
     Uint8List? nonce,
+    String? memo = 'req:$requestId seq:1 prev:00',
   }) async =>
-      jsonEncode(await signVoucher(payer, intents ?? [Transfer(receiver, tokens, memo: 'seq:1 prev:00')],
+      jsonEncode(await signVoucher(payer, intents ?? [Transfer(receiver, tokens, memo: memo)],
           deadline ?? now.add(const Duration(hours: 72)), nonce ?? makeNonce()));
 
   /// Signs an arbitrary message the way a hostile payer app could, bypassing signVoucher.
@@ -41,6 +43,7 @@ void main() {
     'intent': 'transfer',
     'receiver_id': 'merchant.near',
     'tokens': {usdcToken: '2500000'},
+    'memo': 'req:$requestId',
   };
 
   Future<String?> reasonFor(String qr) async => (await checkPayment(qr, request, now: now)).reason;
@@ -55,9 +58,16 @@ void main() {
       expect(amountOf(check.voucher!), '2500000');
     });
 
-    test('accepts a voucher that also carries a memo', () async {
+    test('accepts a voucher whose memo carries more than the request id', () async {
       // The double-spend guards will put a sequence chain in the memo; it must not break acceptance.
       expect(await reasonFor(await voucherQr()), isNull);
+    });
+
+    test('accepts a scanned voucher signed for an earlier request of the same amount', () async {
+      // A payee who backed out and typed the amount again shows a new request id. The payer has
+      // already signed, and that voucher will settle: refusing it would make them pay twice.
+      expect(await reasonFor(await voucherQr(memo: 'req:0000000000000000')), isNull);
+      expect(await reasonFor(await voucherQr(memo: null)), isNull);
     });
 
     test('refuses a voucher that pays someone else', () async {
@@ -173,13 +183,52 @@ void main() {
     });
   });
 
+  // Vouchers also arrive by radio, with nobody holding up a phone. Two customers paying 2.50
+  // are then indistinguishable, and "Paid" would appear for whoever happens to be at the counter.
+  group('a voucher arriving by radio counts for a request only if signed for it', () {
+    Future<bool> names(String? memo) async => namesRequest(jsonDecode(await voucherQr(memo: memo)), request);
+
+    test('counts when the payer app signed it for this request', () async {
+      expect(namesRequest(await signPayment(payer, request), request), isTrue);
+      expect(await names('${request.memoTag} seq:1 prev:00'), isTrue);
+    });
+
+    test('does not count for another request of the same amount, or for none', () async {
+      expect(await names('req:0000000000000000'), isFalse);
+      expect(await names(null), isFalse);
+    });
+
+    test('does not count when the memo only looks like it names the request', () async {
+      expect(await names('x${request.memoTag}'), isFalse);
+      expect(await names('${request.memoTag}1'), isFalse);
+    });
+
+    test('does not count when it names two requests', () async {
+      // Two tills on one merchant account would both show "Paid" for a single payment.
+      expect(await names('${request.memoTag} req:0000000000000000'), isFalse);
+    });
+  });
+
   group('payment request', () {
-    String requestQr({String token = usdcToken, String amount = '2500000'}) =>
-        jsonEncode({'receiver_id': 'merchant.near', 'token': token, 'amount': amount});
+    String requestQr({String token = usdcToken, String amount = '2500000', String? id = requestId}) =>
+        jsonEncode({'receiver_id': 'merchant.near', 'token': token, 'amount': amount, if (id != null) 'id': id});
 
     test('survives the QR round trip', () {
       final decoded = PaymentRequest.decode(request.encode())!;
-      expect((decoded.receiverId, decoded.token, decoded.amount), ('merchant.near', usdcToken, '2500000'));
+      expect((decoded.receiverId, decoded.token, decoded.amount, decoded.id),
+          ('merchant.near', usdcToken, '2500000', requestId));
+    });
+
+    test('two requests for the same amount are different requests', () {
+      expect(newRequestId(), isNot(newRequestId()));
+    });
+
+    test('is refused without an id the memo can carry unchanged', () {
+      // The id is signed into the memo as "req:<id>" among space-separated entries, so an id with
+      // a space or other text in it could never be matched again.
+      for (final bad in [null, '', '9f2c 4e1a7b3d556', '9F2C4E1A7B3D5560', 'x']) {
+        expect(PaymentRequest.decode(requestQr(id: bad)), isNull, reason: '$bad');
+      }
     });
 
     test('is not confused with other QR codes or non-positive amounts', () {

@@ -4,6 +4,8 @@ Local copy of the living spec at https://claude.ai/artifact/WL5vbTkHi7PiMb4KZXe9
 
 **This file is newer on the nonce format (2026-11-06).** The contract source and mainnet `simulate_intents` show the salt applies only to nonces that start with `5628f6c6`. We sign plain 32-byte random nonces, so there is no salt to fetch or go stale. The living spec still describes a salted nonce. The places where this file differs from it are: "Why only on NEAR" item 1, the voucher's `nonce` line, "Parallel nonces" and "Nonce layouts", the Gate 1 paragraph under Schedule, and the first two rows plus the settlement row of the risk table.
 
+**This file is newer on the payment request (2026-11-06).** A request carries a random `id` that the payer signs into the memo as `req:<id>` (steps 3 and 4). A voucher arriving over the mesh marks a request as paid only if it names that request and no other: without the id it cannot be told apart from another customer's payment of the same amount. A scanned voucher is accepted whatever request it names, so a payee who re-enters the amount can still take a voucher already signed. Mainnet `simulate_intents` accepts such memos.
+
 We ship a Flutter app that pays with no internet. The payer signs a NEAR transfer on the phone, nearby phones relay it hop by hop over Bluetooth, and the first phone with a signal settles it on NEAR. Deadline: Nov 14, 23:59 UTC, 9 days from today.
 
 ## Overview
@@ -66,8 +68,8 @@ The voucher is a standard NEAR Intents `transfer` intent, signed with NEP-413. W
 
 1. **Top up (online, once).** The app creates an offline ed25519 key held only on the phone. Its implicit account (the hex of the key) needs no `add_public_key`. The user locks a bond in the NearBy bond contract and funds the same account inside `intents.near` with `ft_transfer_call`, in USDC. That deposit is the offline budget.
 2. **Refresh credential (online).** The relayer signs a balance attestation `{account, token, balance, bond, as_of}`, valid 24 h. The app caches it; merchants check it against the relayer key pinned in the app.
-3. **Pay (offline).** The merchant shows a QR code with `{receiver_id, amount, token}`. The payer signs the intent with a random nonce, a 72 h deadline and the next sequence number, then sends the voucher over Nearby Connections (QR as a fallback).
-4. **Verify (offline).** The merchant checks the signature, that `signer_id` matches the key, the deadline, the nonce, the sequence chain, and the attested balance minus vouchers already seen from this payer. If all pass: "Paid, pending settlement".
+3. **Pay (offline).** The merchant shows a QR code with `{receiver_id, amount, token, id}`, where `id` is random per request. The payer signs the intent with a random nonce, a 72 h deadline, the request id (memo entry `req:<id>`) and the next sequence number, then sends the voucher over Nearby Connections (QR as a fallback).
+4. **Verify (offline).** The merchant checks the signature, (for a voucher that arrives by radio rather than by scanning) that it names the request on screen, that `signer_id` matches the key, the deadline, the nonce, the sequence chain, and the attested balance minus vouchers already seen from this payer. If all pass: "Paid, pending settlement".
 5. **Relay (offline, store-and-forward).** Every phone keeps an outbox. When two phones connect, they swap voucher hashes and send what the other lacks; each voucher carries a hop count that stops at 8. A phone carries its outbox until it meets someone.
 6. **Settle (first phone online).** Any phone with a signal POSTs its outbox to the relayer, which calls `execute_intents` on `intents.near` and pays gas. If the relayer finds two vouchers with the same signer and sequence number, it also submits the pair to the bond contract.
 7. **Confirm.** The relayer returns tx hashes; gateways gossip a signed `settled{voucher_hash, tx}` back into the mesh.

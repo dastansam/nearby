@@ -13,7 +13,7 @@ void main() {
   sqfliteFfiInit();
   databaseFactory = databaseFactoryFfi;
 
-  const request = PaymentRequest(receiverId: 'merchant.near', token: usdcToken, amount: '2500000');
+  const request = PaymentRequest(receiverId: 'merchant.near', token: usdcToken, amount: '2500000', id: '9f2c4e1a7b3d5560');
   late VoucherStore store;
   late SimpleKeyPair payer;
   late Map<String, dynamic> voucher;
