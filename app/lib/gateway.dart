@@ -103,12 +103,19 @@ class Gateway {
       if (results.length != batch.length) throw StateError('relayer answered for ${results.length} of ${batch.length}');
       for (final (j, result) in results.indexed) {
         final outcome = const {'settled': Outcome.settled, 'invalid': Outcome.failed}[result['status']];
-        if (outcome == null) continue;
+        if (outcome == null) {
+          // "rejected" is not final, but a merchant with the customer still in front of them must hear it.
+          if (result['status'] == 'rejected') _store.noteRejection(batch[j], result['reason'] as String? ?? 'rejected');
+          continue;
+        }
         // A settled result may carry the relayer's signed receipt, for phones with no signal that
         // still carry the voucher. They check it against the key this build pins, so one that fails
         // here would only be refused by every peer: record the answer without it, and say so.
-        if (result['receipt'] != null && await keepReceipt(_store, batch[j], result['receipt'])) continue;
-        if (result['receipt'] != null) debugPrint('gateway: the relayer\'s receipt is not signed by the key this build trusts');
+        final receipt = result['receipt'];
+        if (receipt != null) {
+          if (await keepReceipt(_store, batch[j], receipt)) continue;
+          debugPrint('gateway: the relayer\'s receipt is not signed by the key this build trusts');
+        }
         await _store.setOutcome(batch[j], outcome, tx: result['tx'] as String?, block: result['block'] as int?);
       }
     }

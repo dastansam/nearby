@@ -120,9 +120,14 @@ void main() {
       unlucky['signature']: {'status': 'error', 'reason': 'fetch failed'},
     };
     final relayer = gateway((v) => answers[v['signature']]!);
+    // Not stored, but said: a merchant with the customer still there must hear the balance is short.
+    final heard = <String>[];
+    final sub = store.rejections.listen((r) => heard.add('${r.voucher['signature']}: ${r.reason}'));
+    addTearDown(sub.cancel);
 
     await relayer.sync();
     expect([(await stored(short)).outcome, (await stored(unlucky)).outcome], [null, null]);
+    expect(heard, ['${short['signature']}: insufficient balance or overflow']);
 
     answers = {for (final s in answers.keys) s: {'status': 'settled', 'tx': 'tx9'}};
     await relayer.sync();

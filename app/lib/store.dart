@@ -76,6 +76,13 @@ class VoucherStore {
   /// it as pending can show it settled, or not.
   Stream<StoredVoucher> get outcomes => _outcomes.stream;
 
+  /// Vouchers the relayer turned down for now, with its reason (the payer's balance is short, say).
+  /// Nothing is stored: the voucher may still settle, and is uploaded again. The screen showing it
+  /// as pending should say what the chain said.
+  Stream<({Map<String, dynamic> voucher, String reason})> get rejections => _rejections.stream;
+  final _rejections = StreamController<({Map<String, dynamic> voucher, String reason})>.broadcast(sync: true);
+  void noteRejection(Map<String, dynamic> voucher, String reason) => _rejections.add((voucher: voucher, reason: reason));
+
   /// Stores a voucher under its signer and nonce. Returns false, changing nothing, if that slot
   /// is taken: the chain settles it once, so a voucher shown again is the same payment, not a
   /// second one, and a different voucher in the same slot means only one of the two can settle.
@@ -103,8 +110,13 @@ class VoucherStore {
       if (claim) await txn.update('vouchers', {'kind': kind.name}, where: 'key = ?', whereArgs: [key]);
       return claim ? held.single['hops'] as int : null;
     });
-    if (storedHops != null) _puts.add((kind: kind, hops: storedHops, voucher: voucher, outcome: null, tx: null, settledBlock: null));
-    return storedHops != null;
+    if (storedHops == null) return false;
+    // A claimed voucher may have been answered about already: the gateway uploads it as soon as it
+    // is carried. Tell it as it stands.
+    _puts.add(kind == VoucherKind.relayed
+        ? (kind: kind, hops: storedHops, voucher: voucher, outcome: null, tx: null, settledBlock: null)
+        : (await get(key))!);
+    return true;
   }
 
   /// Records the relayer's final answer for [voucher], with the settling [tx], [block] and signed
@@ -114,12 +126,12 @@ class VoucherStore {
   Future<void> setOutcome(Map<String, dynamic> voucher, Outcome outcome,
       {String? tx, int? block, Map<String, dynamic>? receipt}) async {
     final settled = outcome == Outcome.settled, key = voucherKey(voucher);
-    await _db.rawUpdate(
+    final changed = await _db.rawUpdate(
         "UPDATE vouchers SET outcome = CASE outcome WHEN 'settled' THEN outcome ELSE ? END, tx = COALESCE(tx, ?), "
         'settled_block = COALESCE(settled_block, ?), receipt = COALESCE(receipt, ?) WHERE key = ?',
         [outcome.name, settled ? tx : null, settled ? block : null, settled && receipt != null ? jsonEncode(receipt) : null, key]);
-    final now = await get(key);
-    if (now != null) _outcomes.add(now);
+    if (changed == 0) return;
+    _outcomes.add((await get(key))!);
   }
 
   /// Keeps [signed] as the attestation for [account] unless a newer one is already held.

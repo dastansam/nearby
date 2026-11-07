@@ -143,6 +143,17 @@ void main() {
         reason: 'the receipt is passed on to phones still carrying the voucher');
   });
 
+  test('a claimed voucher is announced as it stands, answer and all', () async {
+    // The gateway uploads a carried voucher at once, so the chain can answer before the payee claims it.
+    await store.put(voucher, VoucherKind.relayed, hops: 1);
+    await store.setOutcome(voucher, Outcome.settled, tx: 'tx1', block: 7);
+    final heard = <StoredVoucher>[];
+    final sub = store.puts.listen(heard.add);
+    addTearDown(sub.cancel);
+    await store.put(voucher, VoucherKind.received);
+    expect((heard.single.kind, heard.single.outcome, heard.single.tx), (VoucherKind.received, Outcome.settled, 'tx1'));
+  });
+
   test('tells listeners how a voucher stands once the relayer has answered', () async {
     // The receive screen shows "pending" with the customer still there; this is how it learns better.
     // What is told is the row as it stands, so a late "failed" cannot show over a settlement.
