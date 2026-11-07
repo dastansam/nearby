@@ -60,7 +60,7 @@ Tests: `cargo test` at the root (relayer and voucher), `cargo test -p nearby-bon
 | `bond/` | NEAR contract (Rust, near-sdk): bonds in NEAR, `slash` with two equivocating vouchers, key bans |
 | `voucher/` | The voucher format shared by the relayer and the contract: shapes, NEP-413 hash, memo parsing |
 | `docs/` | Spec and threat model |
-| `testdata/` | Voucher and balance attestation test vectors shared by the Dart and Rust code |
+| `testdata/` | Voucher, balance attestation and settlement receipt test vectors shared by the Dart and Rust code |
 
 ## Status
 
@@ -70,9 +70,10 @@ Not yet proven: no voucher has settled with a funded account (only dry runs agai
 
 Double-spending offline is bounded, provable and punished, not prevented. A payer can still overspend across merchants who have not seen each other's vouchers, up to 25 USDC each, for as long as their attestation lasts. Two vouchers with one sequence number prove it; the relayer hands the pair to the bond contract, and the key forfeits its bond (5 NEAR or more) and is banned. The forfeited bond stays in the contract: paying it to the vouchers' receivers would let a cheat name their own accounts and slash themselves, and compensating the merchant left unpaid needs settlement evidence the contract does not have. The contract has 15 unit tests and has not been deployed or slashed on mainnet yet; the bond is in NEAR while the budget is in USDC, so the two are not compared, and a payer cheating many merchants in one afternoon can still take more than the bond.
 
-Two known rough edges of the offline check:
+Settlements travel back into the mesh: the relayer signs a receipt `{voucher, tx, block}` for each voucher it settles, and a phone that holds one hands it to any peer still carrying that voucher, which marks it settled and stops carrying it. A merchant whose phone stays offline learns of a customer's earlier payment settling when the customer (or anyone who synced) comes back, and until then counts it against them: a returning customer can still be refused before that happens, although their new attested balance already reflects the payment.
 
-- A merchant whose phone stays offline counts a customer's earlier payment against them until that phone learns it settled, so a returning customer can be refused although their new attested balance already reflects it. Nothing tells an offline phone about settlements yet.
+One known rough edge of the offline check:
+
 - A refusal cannot unsign a voucher. A payment the merchant's phone refused can still be carried to the relayer and settle; the receive screen says so.
 
 ## License

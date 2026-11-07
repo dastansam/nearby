@@ -62,6 +62,16 @@ void main() {
     expect((await stored(carried)).outcome, Outcome.settled);
   });
 
+  test('keeps the relayer\'s receipt, for phones with no signal that still carry the voucher', () async {
+    final v = await voucher();
+    await store.put(v, VoucherKind.relayed, hops: 2);
+    final receipt = {'payload': '{"voucher":"${v['signature']}","tx":"tx1","block":5000}', 'signature': 'ed25519:sig'};
+
+    await gateway((_) => {'status': 'settled', 'tx': 'tx1', 'block': 5000, 'receipt': receipt}).sync();
+
+    expect(jsonDecode((await store.held())[voucherKey(v)]!), receipt);
+  });
+
   test('a settled voucher is not uploaded again', () async {
     // Every upload costs the relayer chain lookups, and phones sync every half minute.
     await store.put(await voucher(), VoucherKind.sent);

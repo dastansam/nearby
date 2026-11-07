@@ -4,7 +4,7 @@ use axum::http::{Request, StatusCode};
 use chrono::{DateTime, Duration, Utc};
 use ed25519_dalek::{Signature, SigningKey, Verifier};
 use http_body_util::BodyExt;
-use nearby_relayer::attestation::ATTESTATION_DOMAIN;
+use nearby_relayer::attestation::{ATTESTATION_DOMAIN, RECEIPT_DOMAIN};
 use nearby_relayer::chain::{At, Chain, ChainError};
 use nearby_relayer::server::router;
 use nearby_relayer::settle::{Outcome, Settler};
@@ -744,6 +744,15 @@ fn attestation_key() -> SigningKey {
     SigningKey::from_bytes(&[8; 32])
 }
 
+/// Whether the relayer's attestation key signed `payload` under `domain`, with the signature in `signed`.
+fn relayer_signed(domain: &str, signed: &Value, payload: &str) -> bool {
+    let signature = Signature::from_bytes(&untag(signed["signature"].as_str().unwrap()).unwrap());
+    attestation_key()
+        .verifying_key()
+        .verify(format!("{domain}{payload}").as_bytes(), &signature)
+        .is_ok()
+}
+
 fn now() -> DateTime<Utc> {
     AT.parse().unwrap()
 }
@@ -769,13 +778,27 @@ async fn request(chain: &Arc<FakeChain>, method: &str, path: &str, body: Option<
 #[tokio::test]
 async fn a_gateway_uploads_its_outbox_over_http_and_gets_one_result_per_voucher() {
     let chain = FakeChain::new();
-    let (status, body) = request(&chain, "POST", "/vouchers", Some(json!({ "vouchers": [pay(), {}] }))).await;
+    let v = pay();
+    let (status, body) = request(&chain, "POST", "/vouchers", Some(json!({ "vouchers": [v, {}] }))).await;
     assert_eq!(status, StatusCode::OK);
-    // The exact JSON the app reads: app/lib/gateway.dart looks for "status", "tx" and "block".
+    // The exact JSON the app reads: app/lib/gateway.dart looks for "status", "tx", "block" and "receipt".
     assert_eq!(
-        body,
-        json!({ "results": [{ "status": "settled", "tx": "tx1", "block": BLOCK }, { "status": "invalid", "reason": "malformed" }] })
+        body["results"][1],
+        json!({ "status": "invalid", "reason": "malformed" })
     );
+    let settled = &body["results"][0];
+    assert_eq!(
+        (&settled["status"], &settled["tx"], &settled["block"]),
+        (&json!("settled"), &json!("tx1"), &json!(BLOCK))
+    );
+    // The receipt is for the phones still offline: the relayer's signature over the voucher's
+    // identity and the block, which they check against the pinned key.
+    let payload = settled["receipt"]["payload"].as_str().unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(payload).unwrap(),
+        json!({ "voucher": v.signature, "tx": "tx1", "block": BLOCK })
+    );
+    assert!(relayer_signed(RECEIPT_DOMAIN, &settled["receipt"], payload));
 }
 
 // Phones upload when they briefly have a signal, and often lose it before the answer. The gas is
@@ -841,15 +864,12 @@ async fn an_attestation_is_the_chain_balance_signed_by_the_relayers_published_ke
         about["attestation_key"],
         tag(attestation_key().verifying_key().as_bytes())
     );
-    let signature = Signature::from_bytes(&untag(signed["signature"].as_str().unwrap()).unwrap());
-    let verifies = |payload: &str| {
-        attestation_key()
-            .verifying_key()
-            .verify(format!("{ATTESTATION_DOMAIN}{payload}").as_bytes(), &signature)
-            .is_ok()
-    };
-    assert!(verifies(payload));
-    assert!(!verifies(&payload.replace("25000000", "95000000")));
+    assert!(relayer_signed(ATTESTATION_DOMAIN, &signed, payload));
+    assert!(!relayer_signed(
+        ATTESTATION_DOMAIN,
+        &signed,
+        &payload.replace("25000000", "95000000")
+    ));
 }
 
 #[tokio::test]

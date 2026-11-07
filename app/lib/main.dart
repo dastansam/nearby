@@ -92,9 +92,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (relayerUrl.isNotEmpty) {
       _gateway = Gateway(_store, relayerUrl, account: wallet.accountId, onChange: _reloadVouchers)..start();
     }
-    final gossip = Gossip(NearbyTransport(), _store, onChange: () {
-      if (mounted) setState(() {});
-    });
+    final gossip = Gossip(NearbyTransport(), _store, onChange: _reloadVouchers);
     try {
       await gossip.start();
       if (mounted) setState(() => _gossip = gossip);

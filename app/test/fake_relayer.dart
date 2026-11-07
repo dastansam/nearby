@@ -21,6 +21,15 @@ Future<Map<String, dynamic>> signAttestation(SimpleKeyPair relayer, String accou
     'as_of': (asOf ?? DateTime.now()).toUtc().toIso8601String(),
     'block': block,
   });
-  final signature = await Ed25519().sign(utf8.encode('NearBy balance attestation v1\n$payload'), keyPair: relayer);
+  return _sign(relayer, 'NearBy balance attestation v1\n', payload);
+}
+
+/// The relayer's receipt for [voucher] settling; testdata/receipt-vector.json pins the format.
+Future<Map<String, dynamic>> signReceipt(SimpleKeyPair relayer, Map<String, dynamic> voucher,
+    {String tx = 'tx1', int block = 1000}) =>
+    _sign(relayer, 'NearBy settlement receipt v1\n', jsonEncode({'voucher': voucher['signature'], 'tx': tx, 'block': block}));
+
+Future<Map<String, dynamic>> _sign(SimpleKeyPair relayer, String domain, String payload) async {
+  final signature = await Ed25519().sign(utf8.encode(domain + payload), keyPair: relayer);
   return {'payload': payload, 'signature': tag(signature.bytes)};
 }

@@ -1,8 +1,8 @@
 //! HTTP face of the relayer. Nothing here needs authentication: vouchers authorize themselves by
 //! signature, balances are public, and an attestation is only as good as the relayer's signature on it.
-use crate::attestation::{sign_attestation, Attestation};
+use crate::attestation::{sign_attestation, sign_receipt, Attestation, Receipt};
 use crate::chain::Chain;
-use crate::settle::{Proof, Settler};
+use crate::settle::{Outcome, Proof, Settler};
 use crate::voucher::{iso, tag, USDC_TOKEN};
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, State};
@@ -57,7 +57,8 @@ struct Upload {
     vouchers: Vec<Value>,
 }
 
-/// A gateway phone uploads what it carries. One result per voucher, in order.
+/// A gateway phone uploads what it carries. One result per voucher, in order. A settled one comes
+/// with a signed receipt, for the phones still offline that carry the voucher.
 async fn upload<C: Chain>(
     State(relayer): State<Arc<Relayer<C>>>,
     body: Result<Json<Upload>, JsonRejection>,
@@ -66,7 +67,15 @@ async fn upload<C: Chain>(
         Ok(Json(Upload { vouchers })) if vouchers.len() <= MAX_VOUCHERS => {
             // In a task of its own: a phone that loses its signal mid-upload drops this request, and
             // that must not stop a settlement halfway, with a transaction sent and nothing recorded.
-            match tokio::spawn(async move { relayer.settler.settle(&vouchers).await }).await {
+            let settling = tokio::spawn(async move {
+                let outcomes = relayer.settler.settle(&vouchers).await;
+                outcomes
+                    .into_iter()
+                    .zip(&vouchers)
+                    .map(|(outcome, v)| with_receipt(&relayer.attestation_key, outcome, v))
+                    .collect::<Vec<Value>>()
+            });
+            match settling.await {
                 Ok(results) => Json(json!({ "results": results })).into_response(),
                 Err(_) => refuse(StatusCode::INTERNAL_SERVER_ERROR, "settlement stopped unexpectedly"),
             }
@@ -76,6 +85,20 @@ async fn upload<C: Chain>(
             &format!("send {{ \"vouchers\": [...] }} with at most {MAX_VOUCHERS}"),
         ),
     }
+}
+
+/// The outcome as JSON, with a receipt when the voucher is known to be settled and by which block.
+fn with_receipt(key: &SigningKey, outcome: Outcome, v: &Value) -> Value {
+    let mut json = json!(outcome);
+    if let (Outcome::Settled { tx, block: Some(block) }, Some(voucher)) = (&outcome, v["signature"].as_str()) {
+        let receipt = Receipt {
+            voucher: voucher.to_owned(),
+            tx: tx.clone(),
+            block: *block,
+        };
+        json["receipt"] = json!(sign_receipt(key, &receipt));
+    }
+    json
 }
 
 /// What an offline account holds right now, signed, for the app to show payees while offline.

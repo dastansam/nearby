@@ -3,6 +3,10 @@
 // When two phones connect, each says which vouchers it holds ("have"), asks for the ones it
 // lacks ("want"), and gets them one per message ("voucher"). A phone that signs, accepts or
 // learns a new voucher offers it to its peers, so a payment hops phone to phone until one has a signal.
+//
+// Word of a settlement travels the other way: a phone that holds the relayer's signed receipt for
+// a voucher a peer still carries sends it ("settled"), so the peer marks it settled and stops carrying
+// it. Only in reply to a "have": a receipt fetched while a peer is already connected waits for the next meeting.
 import 'dart:async';
 import 'dart:convert';
 
@@ -33,7 +37,8 @@ class Gossip {
   final Transport _transport;
   final VoucherStore _store;
 
-  /// Called when a peer comes or goes, so the UI can refresh. (New vouchers show up on [VoucherStore.puts].)
+  /// Called when a peer comes or goes, or a receipt from one settles a voucher held here, so the UI
+  /// can refresh. (New vouchers show up on [VoucherStore.puts].)
   final void Function()? onChange;
 
   final _peers = <String>{};
@@ -101,11 +106,27 @@ class Gossip {
   Future<void> _handle(String peer, dynamic m) async {
     switch (m['t']) {
       case 'have':
-        final held = {for (final key in await _store.keys()) gossipId(key)};
+        final held = {for (final e in (await _store.held()).entries) gossipId(e.key): e.value};
+        final ids = (m['ids'] as List).cast<String>();
         await _sendIds([peer], 'want', [
-          for (final id in (m['ids'] as List).cast<String>())
-            if (!held.contains(id)) id
+          for (final id in ids)
+            if (!held.containsKey(id)) id
         ]);
+        // The peer is carrying these for nothing: they have settled, and here is the relayer's word.
+        for (final id in ids) {
+          final receipt = held[id];
+          if (receipt != null) await _send(peer, {'t': 'settled', 'r': jsonDecode(receipt)});
+        }
+      case 'settled':
+        // Only the relayer's own signature says a voucher settled; a peer's word would let anyone
+        // make a merchant drop a payment it is owed.
+        final r = await readReceipt(m['r']);
+        if (r == null) return;
+        for (final s in await _store.all()) {
+          if (s.voucher['signature'] != r.voucher) continue;
+          await _store.setOutcome(s.voucher, Outcome.settled, tx: r.tx, block: r.block, receipt: m['r']);
+          onChange?.call();
+        }
       case 'want':
         final forwardable = await _forwardable(), attested = <String>{};
         for (final id in (m['ids'] as List).cast<String>()) {

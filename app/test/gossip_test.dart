@@ -83,7 +83,7 @@ class Phone {
   final VoucherStore store;
   final Gossip gossip;
 
-  Future<bool> holds(Map<String, dynamic> voucher) async => (await store.keys()).contains(voucherKey(voucher));
+  Future<bool> holds(Map<String, dynamic> voucher) async => (await store.held()).containsKey(voucherKey(voucher));
 }
 
 void main() {
@@ -182,6 +182,58 @@ void main() {
 
     expect(await payee.holds(voucher), isTrue);
     expect(await payee.store.attestation(signerOf(voucher)), isNull);
+  });
+
+  // The merchant has no signal for days. Their customer paid, walked into coverage, and their phone
+  // settled the voucher and got the relayer's receipt. When they come back, the merchant should
+  // learn the payment is done rather than carry it around, and count it against the payer, forever.
+  test('a phone still carrying a settled voucher learns so from one that holds the receipt', () async {
+    final relayer = await Ed25519().newKeyPair();
+    relayerKey = await publicKeyOf(relayer);
+    addTearDown(() => relayerKey = '');
+    final customer = await phone('customer'), merchant = await phone('merchant'), other = await phone('other');
+    final voucher = await payment();
+    await customer.store.put(voucher, VoucherKind.sent);
+    air.link(customer, merchant);
+    await air.settle();
+    air.unlink(customer, merchant);
+    // The customer's phone reaches the relayer (gateway.dart does this) and comes back.
+    await customer.store.setOutcome(voucher, Outcome.settled,
+        tx: 'tx1', block: 5000, receipt: await signReceipt(relayer, voucher, block: 5000));
+
+    air.link(customer, merchant);
+    await air.settle();
+
+    final theirs = (await merchant.store.all()).single;
+    expect((theirs.outcome, theirs.tx, theirs.settledBlock), (Outcome.settled, 'tx1', 5000));
+    expect(air.sent('voucher').length, 1, reason: 'the customer does not fetch back what it already holds');
+
+    // The merchant now carries the receipt in turn, and no longer offers the voucher.
+    air.unlink(customer, merchant);
+    await other.store.put(voucher, VoucherKind.relayed, hops: 3);
+    air.link(merchant, other);
+    await air.settle();
+    expect((await other.store.all()).single.outcome, Outcome.settled);
+    expect(air.sent('voucher').length, 1, reason: 'a settled voucher is not passed on');
+  });
+
+  test('a receipt the trusted relayer did not sign settles nothing', () async {
+    // Otherwise anyone in range could make a merchant drop a payment it is owed.
+    final relayer = await Ed25519().newKeyPair();
+    relayerKey = await publicKeyOf(relayer);
+    addTearDown(() => relayerKey = '');
+    final customer = await phone('customer'), merchant = await phone('merchant');
+    final voucher = await payment();
+    await merchant.store.put(voucher, VoucherKind.received);
+    final forged = await signReceipt(await Ed25519().newKeyPair(), voucher);
+    await customer.store.put(voucher, VoucherKind.sent);
+    await customer.store.setOutcome(voucher, Outcome.settled, receipt: forged);
+
+    air.link(customer, merchant);
+    await air.settle();
+
+    expect(air.sent('settled').single['r'], forged, reason: 'the customer sent it, the merchant must refuse it');
+    expect((await merchant.store.all()).single.outcome, isNull);
   });
 
   // The payer may keep the QR on screen for minutes; the payment should already be travelling.

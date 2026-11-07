@@ -34,7 +34,7 @@ class VoucherStore {
   VoucherStore._(this._db);
 
   static Future<VoucherStore> open([String path = 'nearby.db']) async => VoucherStore._(
-      await openDatabase(path, version: 4, onCreate: (db, _) => _migrate(db, 0), onUpgrade: (db, from, _) => _migrate(db, from)));
+      await openDatabase(path, version: 5, onCreate: (db, _) => _migrate(db, 0), onUpgrade: (db, from, _) => _migrate(db, from)));
 
   /// Brings a database at version [from] (0: empty) up to date, one version's changes at a time.
   static Future<void> _migrate(Database db, int from) async {
@@ -62,6 +62,9 @@ class VoucherStore {
     if (from < 4) {
       await db.execute('ALTER TABLE vouchers ADD COLUMN settled_block INTEGER');
       await db.execute('CREATE TABLE attestations (account TEXT PRIMARY KEY, as_of INTEGER NOT NULL, json TEXT NOT NULL)');
+    }
+    if (from < 5) {
+      await db.execute('ALTER TABLE vouchers ADD COLUMN receipt TEXT');
     }
   }
 
@@ -99,14 +102,24 @@ class VoucherStore {
     return storedHops != null;
   }
 
-  /// Records the relayer's final answer for [voucher], with the settling [tx] and [block] if it
-  /// knew them. The row stays, so the mesh still counts the voucher as held and does not fetch it
-  /// again. A voucher recorded as settled stays settled, and keeps the transaction and block it
-  /// has; ones it lacks can still be filled in.
-  Future<void> setOutcome(Map<String, dynamic> voucher, Outcome outcome, {String? tx, int? block}) => _db.rawUpdate(
-      "UPDATE vouchers SET outcome = CASE outcome WHEN 'settled' THEN outcome ELSE ? END, "
-      'tx = COALESCE(tx, ?), settled_block = COALESCE(settled_block, ?) WHERE key = ?',
-      [outcome.name, outcome == Outcome.settled ? tx : null, outcome == Outcome.settled ? block : null, voucherKey(voucher)]);
+  /// Records the relayer's final answer for [voucher], with the settling [tx], [block] and signed
+  /// [receipt] (see [held]) if it gave them. The row stays, so the mesh still counts the voucher as
+  /// held and does not fetch it again. A voucher recorded as settled stays settled, and keeps the
+  /// transaction, block and receipt it has; ones it lacks can still be filled in.
+  Future<void> setOutcome(Map<String, dynamic> voucher, Outcome outcome,
+      {String? tx, int? block, Map<String, dynamic>? receipt}) {
+    final settled = outcome == Outcome.settled;
+    return _db.rawUpdate(
+        "UPDATE vouchers SET outcome = CASE outcome WHEN 'settled' THEN outcome ELSE ? END, tx = COALESCE(tx, ?), "
+        'settled_block = COALESCE(settled_block, ?), receipt = COALESCE(receipt, ?) WHERE key = ?',
+        [
+          outcome.name,
+          settled ? tx : null,
+          settled ? block : null,
+          settled && receipt != null ? jsonEncode(receipt) : null,
+          voucherKey(voucher),
+        ]);
+  }
 
   /// Keeps [signed] as the attestation for [account] unless a newer one is already held.
   Future<void> saveAttestation(String account, DateTime asOf, Map<String, dynamic> signed) => _db.rawInsert(
@@ -125,7 +138,10 @@ class VoucherStore {
       // A range, which the primary key index can answer; LIKE would read every row. ";" follows ":".
       _select(where: 'key >= ? AND key < ?', whereArgs: ['$signer:', '$signer;']);
 
-  Future<Set<String>> keys() async => {for (final r in await _db.query('vouchers', columns: ['key'])) r['key'] as String};
+  /// Every voucher key held, with the relayer's signed receipt for it where there is one, as the JSON
+  /// text it was given in. Two columns only: the mesh asks this for every "have" it hears.
+  Future<Map<String, String?>> held() async =>
+      {for (final r in await _db.query('vouchers', columns: ['key', 'receipt'])) r['key'] as String: r['receipt'] as String?};
 
   /// Newest first.
   Future<List<StoredVoucher>> all() => _select();

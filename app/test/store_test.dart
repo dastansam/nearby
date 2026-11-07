@@ -134,11 +134,13 @@ void main() {
     await store.put(voucher, VoucherKind.received);
     await store.setOutcome(voucher, Outcome.settled, tx: 'tx1');
     expect((await store.from(signerOf(voucher))).single.settledBlock, isNull);
-    await store.setOutcome(voucher, Outcome.settled, block: 5000);
-    await store.setOutcome(voucher, Outcome.settled, block: 9000);
+    await store.setOutcome(voucher, Outcome.settled, block: 5000, receipt: {'payload': 'p', 'signature': 's'});
+    await store.setOutcome(voucher, Outcome.settled, block: 9000, receipt: {'payload': 'q', 'signature': 't'});
     await store.setOutcome(voucher, Outcome.failed, tx: 'other', block: 1);
     final kept = (await store.from(signerOf(voucher))).single;
     expect((kept.outcome, kept.tx, kept.settledBlock), (Outcome.settled, 'tx1', 5000));
+    expect(jsonDecode((await store.held())[voucherKey(voucher)]!), {'payload': 'p', 'signature': 's'},
+        reason: 'the receipt is passed on to phones still carrying the voucher');
   });
 
   test('finds every voucher of one payer and nobody else\'s', () async {

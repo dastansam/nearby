@@ -45,6 +45,27 @@ void main() {
     }
   });
 
+  group('a settlement receipt', () {
+    // Produced by relayer/src/attestation.rs too (same key). A phone with no signal drops a voucher
+    // it is owed on the strength of this, so nothing but the relayer's own signature may do.
+    final receiptVector = jsonDecode(File('../testdata/receipt-vector.json').readAsStringSync()) as Map<String, dynamic>;
+    final signedReceipt = receiptVector['signed'] as Map<String, dynamic>;
+
+    test('reads one the relayer signed', () async {
+      final r = (await readReceipt(signedReceipt))!;
+      expect((r.voucher, r.tx, r.block), (receiptVector['receipt']['voucher'], receiptVector['receipt']['tx'], 223318490));
+    });
+
+    test('refuses one naming another voucher, and an attestation offered as a receipt', () async {
+      final other = {...signedReceipt, 'payload': (signedReceipt['payload'] as String).replaceFirst('3s1dc5', '3s1dc6')};
+      expect(await readReceipt(other), isNull);
+      // Same key, different domain: a signature over one kind of statement must not pass for the other.
+      expect(await readReceipt(signed), isNull);
+      expect(await readAttestation(signedReceipt), isNull);
+      expect(await readReceipt(null), isNull);
+    });
+  });
+
   test('the store keeps the freshest attestation for an account', () async {
     // Attestations travel with vouchers, so an old one can arrive after a new one. Falling back
     // to it would bring back a balance the payer has since spent.
