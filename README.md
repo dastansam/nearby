@@ -1,6 +1,6 @@
 # NearBy
 
-Offline payments relayed phone-to-phone over Bluetooth and Wi-Fi ([Nearby Connections](https://developers.google.com/nearby/connections/overview)) and settled on NEAR through [NEAR Intents](https://docs.near-intents.org).
+Offline payments relayed phone-to-phone over Bluetooth and Wi-Fi ([Nearby Connections](https://developers.google.com/nearby/connections/overview) on Android, [Multipeer Connectivity](https://developer.apple.com/documentation/multipeerconnectivity) on iOS) and settled on NEAR through [NEAR Intents](https://docs.near-intents.org).
 
 > Pay anyone nearby, even with no signal. Settled on NEAR.
 
@@ -30,7 +30,9 @@ flutter build apk --debug \
   --dart-define=RELAYER_KEY=ed25519:<attestation key from GET />
 ```
 
-Debug builds may use plain `http`; release builds need `https`. Without `RELAYER_URL` the app still pays, receives and relays, but never uploads. Without `RELAYER_KEY` there is no relayer whose balance attestations the app trusts, so payees skip the balance check (the receive screen says so) and enforce only the 25 USDC limit and the sequence numbers.
+For iPhones, with Xcode installed and a signing team chosen once in `app/ios/Runner.xcodeproj` (open it in Xcode, Signing & Capabilities): `flutter run -d <iphone>` with the same `--dart-define`s, or `flutter build ipa` for TestFlight.
+
+Debug builds may use plain `http`; release and TestFlight builds need `https`. Without `RELAYER_URL` the app still pays, receives and relays, but never uploads. Without `RELAYER_KEY` there is no relayer whose balance attestations the app trusts, so payees skip the balance check (the receive screen says so) and enforce only the 25 USDC limit and the sequence numbers.
 
 Tests: `cargo test` in `relayer/`, `flutter test` in `app/`.
 
@@ -38,7 +40,8 @@ Tests: `cargo test` in `relayer/`, `flutter test` in `app/`.
 
 | Path | What |
 | --- | --- |
-| `app/` | Flutter app (Android): offline wallet, voucher signing/verification, QR pay and receive, phone-to-phone relay, upload to the relayer |
+| `app/` | Flutter app (Android and iOS): offline wallet, voucher signing/verification, QR pay and receive, phone-to-phone relay, upload to the relayer |
+| `app/ios/Runner/Multipeer.swift` | The iOS radio: Multipeer Connectivity behind the same `Transport` interface as Android's Nearby Connections |
 | `relayer/` | Rust service: receives vouchers, calls `execute_intents`, signs balance attestations, keeps pairs of vouchers that prove a double-spend |
 | `relayer/src/bin/settle-test.rs` | Gate 1: sign a voucher now, submit it later, see whether it settles (`cargo run --bin settle-test -- sign`, then `submit`) |
 | `docs/` | Spec and threat model |
@@ -49,6 +52,8 @@ Tests: `cargo test` in `relayer/`, `flutter test` in `app/`.
 Hackathon build for NEAR Hackathon (submissions close 2026-11-14 23:59 UTC). Mainnet only: Intents has no testnet deployment.
 
 Not yet proven: no voucher has settled with a funded account (only dry runs against mainnet), and the phone-to-phone relay has only run in tests, not on phones.
+
+The relay is per platform: iPhones find iPhones, Android phones find Android phones, and the two never find each other. Everything else, including the QR path, works across the two.
 
 Double-spending offline is bounded and provable, not prevented. A payer can still overspend across merchants who have not seen each other's vouchers, up to 25 USDC each. Two vouchers with one sequence number prove it, and the relayer keeps such pairs, but the bond contract that would punish it is not built yet.
 
