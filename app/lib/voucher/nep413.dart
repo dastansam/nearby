@@ -1,5 +1,5 @@
 // NEP-413 signed transfer intents ("vouchers") for intents.near.
-// Must produce byte-identical hashes to relayer/src/voucher.ts.
+// Must produce byte-identical hashes to relayer/src/voucher.rs.
 import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
@@ -49,10 +49,19 @@ String nonceId(Map<String, dynamic> v) => hex.encode(base64.decode(v['payload'][
 
 /// Identifies a voucher the way the chain does: it settles one voucher per signer and nonce.
 /// Only the signer can produce a voucher under their key, so nobody else can occupy it.
-String voucherKey(Map<String, dynamic> v) => '${implicitAccount(_untag(v['public_key']))}:${nonceId(v)}';
+String voucherKey(Map<String, dynamic> v) => '${signerOf(v)}:${nonceId(v)}';
+
+/// The account a voucher spends from: the implicit account of the key that signed it.
+String signerOf(Map<String, dynamic> v) => implicitAccount(untag(v['public_key']));
+
+/// Short fingerprint of a voucher, which the payer's next voucher names as its "prev".
+String voucherHash(Map<String, dynamic> v) => c.sha256.convert(utf8.encode(v['signature'])).toString().substring(0, 16);
+
+/// A key or signature the way NEAR writes it: "ed25519:<base58>".
+String tag(List<int> bytes) => 'ed25519:${base58.encode(Uint8List.fromList(bytes))}';
 
 /// Bytes of an "ed25519:<base58>" key or signature.
-Uint8List _untag(String tagged) => base58.decode(tagged.replaceFirst('ed25519:', ''));
+Uint8List untag(String tagged) => base58.decode(tagged.replaceFirst('ed25519:', ''));
 
 DateTime voucherDeadline(Map<String, dynamic> v) => DateTime.parse(jsonDecode(v['payload']['message'])['deadline']);
 
@@ -68,7 +77,7 @@ class Transfer {
 /// UTC with millisecond precision, like JS toISOString(): the deadline format checked against intents.near.
 String _isoMillis(DateTime t) => DateTime.fromMillisecondsSinceEpoch(t.millisecondsSinceEpoch, isUtc: true).toIso8601String();
 
-/// The exact JSON string that gets signed. Key order matches the TS reference so both sides
+/// The exact JSON string that gets signed. Key order matches the relayer (relayer/src/voucher.rs) so both sides
 /// hash the same bytes.
 String intentMessage(String signerId, List<Transfer> intents, DateTime deadline) => jsonEncode({
       'signer_id': signerId,
@@ -79,8 +88,8 @@ String intentMessage(String signerId, List<Transfer> intents, DateTime deadline)
 Map<String, dynamic> _envelope(String message, List<int> nonce, List<int> pub, List<int> sig) => {
       'standard': 'nep413',
       'payload': {'message': message, 'nonce': base64.encode(nonce), 'recipient': verifyingContract},
-      'public_key': 'ed25519:${base58.encode(Uint8List.fromList(pub))}',
-      'signature': 'ed25519:${base58.encode(Uint8List.fromList(sig))}',
+      'public_key': tag(pub),
+      'signature': tag(sig),
     };
 
 Future<Map<String, dynamic>> signVoucher(
@@ -101,7 +110,7 @@ Future<String?> verifyVoucher(Map<String, dynamic> v, {DateTime? now}) async {
   if (v['standard'] != 'nep413') return 'standard';
   final p = v['payload'] as Map<String, dynamic>;
   if (p['recipient'] != verifyingContract) return 'recipient';
-  final pub = _untag(v['public_key']), sig = _untag(v['signature']);
+  final pub = untag(v['public_key']), sig = untag(v['signature']);
   final nonce = base64.decode(p['nonce']);
   final ok = await _ed.verify(nep413Hash(p['message'], nonce, verifyingContract),
       signature: Signature(sig, publicKey: SimplePublicKey(pub, type: KeyPairType.ed25519)));

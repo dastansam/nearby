@@ -10,6 +10,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 
 import '../store.dart';
+import '../voucher/attestation.dart';
 import '../voucher/nep413.dart';
 import 'transport.dart';
 
@@ -75,12 +76,12 @@ class Gossip {
   Future<void> _enqueue(Future<void> Function() task) =>
       _queue = _queue.then((_) => task()).catchError((Object e) => debugPrint('gossip: $e'));
 
-  /// Vouchers worth passing on, by gossip id: not expired and not at the hop limit.
+  /// Vouchers worth passing on, by gossip id: not settled, not expired and not at the hop limit.
   Future<Map<String, StoredVoucher>> _forwardable() async {
     final now = DateTime.now();
     return {
       for (final s in await _store.all())
-        if (s.hops < maxHops && voucherDeadline(s.voucher).isAfter(now)) gossipId(voucherKey(s.voucher)): s
+        if (canSettle(s, now) && s.hops < maxHops) gossipId(voucherKey(s.voucher)): s
     };
   }
 
@@ -106,16 +107,23 @@ class Gossip {
             if (!held.contains(id)) id
         ]);
       case 'want':
-        final forwardable = await _forwardable();
+        final forwardable = await _forwardable(), attested = <String>{};
         for (final id in (m['ids'] as List).cast<String>()) {
           final s = forwardable[id];
-          if (s != null) await _send(peer, {'t': 'voucher', 'v': s.voucher, 'hops': s.hops + 1});
+          if (s == null) continue;
+          // The payee needs the payer's balance attestation and has no network to fetch it with.
+          // Once per payer is enough: the receiver keeps it.
+          final signer = signerOf(s.voucher);
+          final attestation = attested.add(signer) ? await _store.attestation(signer) : null;
+          await _send(peer, {'t': 'voucher', 'v': s.voucher, 'hops': s.hops + 1, if (attestation != null) 'a': attestation});
         }
       case 'voucher':
         final v = m['v'] as Map<String, dynamic>, hops = m['hops'] as int;
         // Carry only what could still settle: a relay has no other way to tell a payment from junk.
         if (hops < 1 || hops > maxHops || await verifyVoucher(v) != null) return;
         if (voucherDeadline(v).isAfter(DateTime.now().add(_maxLifetime))) return;
+        // Before the voucher, so whoever hears of the voucher finds the attestation already here.
+        await keepAttestation(_store, m['a']);
         if (!await _store.put(v, VoucherKind.relayed, hops: hops)) return;
         if (hops < maxHops) await _sendIds(_peers.where((p) => p != peer), 'have', [gossipId(voucherKey(v))]);
     }

@@ -7,9 +7,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:nearby/mesh/gossip.dart';
 import 'package:nearby/mesh/transport.dart';
 import 'package:nearby/store.dart';
+import 'package:nearby/voucher/attestation.dart';
 import 'package:nearby/voucher/nep413.dart';
 import 'package:nearby/voucher/payment.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+
+import 'fake_relayer.dart';
 
 /// An in-memory radio. Phones are in range only when linked, and every message is recorded.
 class Air {
@@ -125,6 +128,62 @@ void main() {
     expect(carried.voucher, voucher, reason: 'the gateway must be able to submit exactly what was signed');
   });
 
+  // A payee checks the payer's balance before accepting, and has no network to ask with. So the
+  // relayer's signed statement of that balance has to come along with the payment.
+  test('the payer\'s balance attestation travels with the payment', () async {
+    final relayer = await Ed25519().newKeyPair(), key = await Ed25519().newKeyPair();
+    relayerKey = await publicKeyOf(relayer);
+    addTearDown(() => relayerKey = '');
+    final payer = await phone('payer'), walker = await phone('walker'), payee = await phone('payee');
+    final voucher = await signPayment(key, request);
+    await keepAttestation(payer.store, await signAttestation(relayer, signerOf(voucher), '3000000'));
+    await payer.store.put(voucher, VoucherKind.sent);
+
+    air.link(payer, walker);
+    await air.settle();
+    air.unlink(payer, walker);
+    air.link(walker, payee);
+    await air.settle();
+
+    expect((await attestationFor(payee.store, signerOf(voucher)))?.balance, BigInt.from(3000000));
+  });
+
+  test('one attestation is sent for a payer, however many of their payments are passed on', () async {
+    // It is as large as a voucher, and radio time is the scarce thing here.
+    final relayer = await Ed25519().newKeyPair(), key = await Ed25519().newKeyPair();
+    relayerKey = await publicKeyOf(relayer);
+    addTearDown(() => relayerKey = '');
+    final payer = await phone('payer'), payee = await phone('payee');
+    final first = await signPayment(key, request);
+    await keepAttestation(payer.store, await signAttestation(relayer, signerOf(first), '9000000'));
+    await payer.store.put(first, VoucherKind.sent);
+    await payer.store.put(await signPayment(key, request, seq: 2, prev: voucherHash(first)), VoucherKind.sent);
+
+    air.link(payer, payee);
+    await air.settle();
+
+    expect((await payee.store.all()).length, 2);
+    expect(air.sent('voucher').where((m) => m['a'] != null).length, 1);
+  });
+
+  test('a relay does not keep an attestation the trusted relayer did not sign', () async {
+    // Otherwise any phone in range could plant a large balance for an account and then spend against it.
+    final relayer = await Ed25519().newKeyPair(), key = await Ed25519().newKeyPair();
+    relayerKey = await publicKeyOf(relayer);
+    addTearDown(() => relayerKey = '');
+    final payer = await phone('payer'), payee = await phone('payee');
+    final voucher = await signPayment(key, request);
+    final forged = await signAttestation(await Ed25519().newKeyPair(), signerOf(voucher), '900000000');
+    await payer.store.saveAttestation(signerOf(voucher), DateTime.now(), forged);
+    await payer.store.put(voucher, VoucherKind.sent);
+
+    air.link(payer, payee);
+    await air.settle();
+
+    expect(await payee.holds(voucher), isTrue);
+    expect(await payee.store.attestation(signerOf(voucher)), isNull);
+  });
+
   // The payer may keep the QR on screen for minutes; the payment should already be travelling.
   test('a payment is offered to connected phones as soon as it is stored, and passed on', () async {
     final payer = await phone('payer'), middle = await phone('middle'), far = await phone('far');
@@ -159,6 +218,21 @@ void main() {
     await air.settle();
 
     expect(air.sent('voucher').map((m) => m['v']), [second]);
+  });
+
+  test('a voucher that has settled is no longer passed on', () async {
+    // It has done its job; carrying it further only spends other phones' radio time and storage.
+    final gateway = await phone('gateway'), late = await phone('late');
+    final settled = await payment(), pending = await payment();
+    await gateway.store.put(settled, VoucherKind.relayed, hops: 1);
+    await gateway.store.put(pending, VoucherKind.relayed, hops: 1);
+    await gateway.store.setOutcome(settled, Outcome.settled, tx: 'tx1');
+
+    air.link(gateway, late);
+    await air.settle();
+
+    expect(await late.holds(pending), isTrue);
+    expect(await late.holds(settled), isFalse);
   });
 
   test('a voucher stops being passed on at the hop limit', () async {

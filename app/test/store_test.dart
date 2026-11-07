@@ -97,6 +97,86 @@ void main() {
     expect(await upgraded.put(voucher, VoucherKind.received), isFalse, reason: 'and it still cannot be accepted twice');
   });
 
+  test('a voucher marked settled keeps its transaction and its place in the store', () async {
+    await store.put(voucher, VoucherKind.received);
+    await store.setOutcome(voucher, Outcome.settled, tx: 'tx1');
+    // Later reports must not lose the link we had or undo the settlement: the money has moved.
+    await store.setOutcome(voucher, Outcome.settled);
+    await store.setOutcome(voucher, Outcome.failed);
+
+    final stored = (await store.all()).singleWhere((s) => voucherKey(s.voucher) == voucherKey(voucher));
+    expect((stored.outcome, stored.tx), (Outcome.settled, 'tx1'));
+    expect(await store.put(voucher, VoucherKind.received), isFalse, reason: 'settled is still not a new payment');
+  });
+
+  test('payments stored before settlement was tracked survive the upgrade, as unsettled', () async {
+    final dir = Directory.systemTemp.createTempSync('nearby_store_');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final path = '${dir.path}/v2.db';
+    final old = await openDatabase(path,
+        version: 2,
+        onCreate: (db, _) => db.execute('CREATE TABLE vouchers (key TEXT PRIMARY KEY, kind TEXT NOT NULL, '
+            'hops INTEGER NOT NULL, json TEXT NOT NULL, created_at INTEGER NOT NULL)'));
+    await old.insert('vouchers',
+        {'key': voucherKey(voucher), 'kind': 'received', 'hops': 0, 'json': jsonEncode(voucher), 'created_at': 1});
+    await old.close();
+
+    final upgraded = await VoucherStore.open(path);
+    final kept = (await upgraded.all()).single;
+    expect((kept.kind, kept.outcome, kept.tx), (VoucherKind.received, null, null));
+    await upgraded.setOutcome(voucher, Outcome.settled, tx: 'tx1');
+    expect((await upgraded.all()).single.tx, 'tx1');
+  });
+
+  test('a settled voucher takes its block when the relayer learns it, and then keeps it', () async {
+    // The block decides whether an attested balance already includes this payment. It can arrive
+    // after the "settled" itself; once known, a later and different report must not move it.
+    await store.put(voucher, VoucherKind.received);
+    await store.setOutcome(voucher, Outcome.settled, tx: 'tx1');
+    expect((await store.from(signerOf(voucher))).single.settledBlock, isNull);
+    await store.setOutcome(voucher, Outcome.settled, block: 5000);
+    await store.setOutcome(voucher, Outcome.settled, block: 9000);
+    await store.setOutcome(voucher, Outcome.failed, tx: 'other', block: 1);
+    final kept = (await store.from(signerOf(voucher))).single;
+    expect((kept.outcome, kept.tx, kept.settledBlock), (Outcome.settled, 'tx1', 5000));
+  });
+
+  test('finds every voucher of one payer and nobody else\'s', () async {
+    // The balance check subtracts what this payer has spent. Missing one overstates what they
+    // have left; picking up a stranger's refuses an honest payer.
+    final fresh = await VoucherStore.open(inMemoryDatabasePath);
+    final other = await signPayment(await Ed25519().newKeyPair(), request);
+    final second = await sign('other.near', makeNonce());
+    await fresh.put(voucher, VoucherKind.received);
+    await fresh.put(second, VoucherKind.relayed, hops: 2);
+    await fresh.put(other, VoucherKind.relayed, hops: 1);
+    final theirs = await fresh.from(signerOf(voucher));
+    expect(theirs.map((s) => s.voucher['signature']), containsAll([voucher['signature'], second['signature']]));
+    expect(theirs.map((s) => signerOf(s.voucher)).toSet(), {signerOf(voucher)});
+  });
+
+  test('payments stored before balances were checked survive the upgrade', () async {
+    final dir = Directory.systemTemp.createTempSync('nearby_store_');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final path = '${dir.path}/v3.db';
+    final old = await openDatabase(path,
+        version: 3,
+        onCreate: (db, _) => db.execute('CREATE TABLE vouchers (key TEXT PRIMARY KEY, kind TEXT NOT NULL, '
+            'hops INTEGER NOT NULL, json TEXT NOT NULL, created_at INTEGER NOT NULL, outcome TEXT, tx TEXT)'));
+    await old.insert('vouchers', {
+      'key': voucherKey(voucher), 'kind': 'received', 'hops': 0, 'json': jsonEncode(voucher), 'created_at': 1,
+      'outcome': 'settled', 'tx': 'tx1', //
+    });
+    await old.close();
+
+    final upgraded = await VoucherStore.open(path);
+    final kept = (await upgraded.all()).single;
+    // Settled in a block nobody recorded: the balance check has to treat it as possibly not yet counted.
+    expect((kept.outcome, kept.tx, kept.settledBlock), (Outcome.settled, 'tx1', null));
+    await upgraded.saveAttestation('acct', DateTime.utc(2026, 11, 10), {'payload': 'p'});
+    expect(await upgraded.attestation('acct'), {'payload': 'p'});
+  });
+
   test('lists what was stored', () async {
     await store.put(voucher, VoucherKind.sent);
     final stored = (await store.all()).singleWhere((s) => voucherKey(s.voucher) == voucherKey(voucher));
