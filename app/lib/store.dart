@@ -138,6 +138,9 @@ class VoucherStore {
       // A range, which the primary key index can answer; LIKE would read every row. ";" follows ":".
       _select(where: 'key >= ? AND key < ?', whereArgs: ['$signer:', '$signer;']);
 
+  /// The voucher stored under [key], if any.
+  Future<StoredVoucher?> get(String key) async => (await _select(where: 'key = ?', whereArgs: [key])).firstOrNull;
+
   /// Every voucher key held, with the relayer's signed receipt for it where there is one, as the JSON
   /// text it was given in. Two columns only: the mesh asks this for every "have" it hears.
   Future<Map<String, String?>> held() async =>

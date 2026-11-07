@@ -51,18 +51,22 @@ void main() {
     final receiptVector = jsonDecode(File('../testdata/receipt-vector.json').readAsStringSync()) as Map<String, dynamic>;
     final signedReceipt = receiptVector['signed'] as Map<String, dynamic>;
 
+    final voucher = {'signature': receiptVector['receipt']['voucher']};
+
     test('reads one the relayer signed', () async {
-      final r = (await readReceipt(signedReceipt))!;
-      expect((r.voucher, r.tx, r.block), (receiptVector['receipt']['voucher'], receiptVector['receipt']['tx'], 223318490));
+      final r = (await readReceipt(signedReceipt, voucher))!;
+      expect((r.voucher, r.tx, r.block), (voucher['signature'], receiptVector['receipt']['tx'], 223318490));
     });
 
-    test('refuses one naming another voucher, and an attestation offered as a receipt', () async {
-      final other = {...signedReceipt, 'payload': (signedReceipt['payload'] as String).replaceFirst('3s1dc5', '3s1dc6')};
-      expect(await readReceipt(other), isNull);
+    test('refuses one for another voucher, and an attestation offered as a receipt', () async {
+      expect(await readReceipt(signedReceipt, {'signature': 'ed25519:other'}), isNull);
+      // Re-pointed at another voucher, with the signature kept: the signature no longer covers it.
+      final edited = {...signedReceipt, 'payload': (signedReceipt['payload'] as String).replaceFirst('3s1dc5', '3s1dc6')};
+      expect(await readReceipt(edited, {'signature': (voucher['signature'] as String).replaceFirst('3s1dc5', '3s1dc6')}), isNull);
       // Same key, different domain: a signature over one kind of statement must not pass for the other.
-      expect(await readReceipt(signed), isNull);
+      expect(await readReceipt(signed, voucher), isNull);
       expect(await readAttestation(signedReceipt), isNull);
-      expect(await readReceipt(null), isNull);
+      expect(await readReceipt(null, voucher), isNull);
     });
   });
 

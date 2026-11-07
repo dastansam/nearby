@@ -31,7 +31,7 @@ typedef Attestation = ({String account, String token, BigInt balance, BigInt bon
 bool isStale(Attestation a, DateTime now) => a.asOf.add(attestationLifetime).isBefore(now);
 
 /// The relayer's word that the voucher with signature [voucher] settled, in [tx] by [block].
-typedef Receipt = ({String voucher, String? tx, int block});
+typedef Receipt = ({String voucher, String tx, int block});
 
 /// The statement in [signed] ({payload, signature}) if the trusted relayer signed it, else null.
 Future<Attestation?> readAttestation(dynamic signed) async {
@@ -50,14 +50,26 @@ Future<Attestation?> readAttestation(dynamic signed) async {
   }
 }
 
-/// The receipt in [signed] ({payload, signature}) if the trusted relayer signed it, else null.
-Future<Receipt?> readReceipt(dynamic signed) async {
+/// The receipt in [signed] ({payload, signature}) if the trusted relayer signed it for [voucher], else null.
+Future<Receipt?> readReceipt(dynamic signed, Map<String, dynamic> voucher) async {
   try {
     final r = jsonDecode(await _statement(_receiptDomain, signed));
-    return (voucher: r['voucher'] as String, tx: r['tx'] as String?, block: r['block'] as int);
+    if (r['voucher'] != voucher['signature']) return null;
+    return (voucher: r['voucher'] as String, tx: r['tx'] as String, block: r['block'] as int);
   } catch (_) {
     return null;
   }
+}
+
+/// Marks [voucher] settled in the store on the strength of [signed], if it is the relayer's receipt
+/// for it. What is kept is the receipt alone, not whatever came around it, for passing on. Returns
+/// whether it was.
+Future<bool> keepReceipt(VoucherStore store, Map<String, dynamic> voucher, dynamic signed) async {
+  final r = await readReceipt(signed, voucher);
+  if (r == null) return false;
+  await store.setOutcome(voucher, Outcome.settled,
+      tx: r.tx, block: r.block, receipt: {'payload': signed['payload'], 'signature': signed['signature']});
+  return true;
 }
 
 /// The payload of [signed], once the trusted relayer's signature over [domain] + payload checks out. Throws otherwise.

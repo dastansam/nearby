@@ -32,14 +32,16 @@ const _idsPerMessage = 1000;
 String gossipId(String voucherKey) => sha256.convert(utf8.encode(voucherKey)).toString().substring(0, 16);
 
 class Gossip {
-  Gossip(this._transport, this._store, {this.onChange});
+  Gossip(this._transport, this._store, {this.onChange, this.onSettled});
 
   final Transport _transport;
   final VoucherStore _store;
 
-  /// Called when a peer comes or goes, or a receipt from one settles a voucher held here, so the UI
-  /// can refresh. (New vouchers show up on [VoucherStore.puts].)
+  /// Called when a peer comes or goes, so the UI can refresh. (New vouchers show up on [VoucherStore.puts].)
   final void Function()? onChange;
+
+  /// Called when a receipt from a peer settles a voucher held here.
+  final void Function()? onSettled;
 
   final _peers = <String>{};
   StreamSubscription<void>? _puts;
@@ -61,7 +63,12 @@ class Gossip {
       onConnected: (peer) => _enqueue(() async {
         _peers.add(peer);
         onChange?.call();
-        await _sendIds([peer], 'have', (await _forwardable()).keys.toList());
+        // Everything still open, not just what is worth passing on: a voucher that expired or ran
+        // out of hops here may have settled elsewhere, and only a peer with the receipt can say so.
+        await _sendIds([peer], 'have', [
+          for (final s in await _store.all())
+            if (s.outcome == null) gossipId(voucherKey(s.voucher))
+        ]);
       }),
       onDisconnected: (peer) => _enqueue(() async {
         _peers.remove(peer);
@@ -106,7 +113,7 @@ class Gossip {
   Future<void> _handle(String peer, dynamic m) async {
     switch (m['t']) {
       case 'have':
-        final held = {for (final e in (await _store.held()).entries) gossipId(e.key): e.value};
+        final held = {for (final e in (await _store.held()).entries) gossipId(e.key): e};
         final ids = (m['ids'] as List).cast<String>();
         await _sendIds([peer], 'want', [
           for (final id in ids)
@@ -114,19 +121,14 @@ class Gossip {
         ]);
         // The peer is carrying these for nothing: they have settled, and here is the relayer's word.
         for (final id in ids) {
-          final receipt = held[id];
-          if (receipt != null) await _send(peer, {'t': 'settled', 'r': jsonDecode(receipt)});
+          final receipt = held[id]?.value;
+          if (receipt != null) await _send(peer, {'t': 'settled', 'k': held[id]!.key, 'r': jsonDecode(receipt)});
         }
       case 'settled':
-        // Only the relayer's own signature says a voucher settled; a peer's word would let anyone
-        // make a merchant drop a payment it is owed.
-        final r = await readReceipt(m['r']);
-        if (r == null) return;
-        for (final s in await _store.all()) {
-          if (s.voucher['signature'] != r.voucher) continue;
-          await _store.setOutcome(s.voucher, Outcome.settled, tx: r.tx, block: r.block, receipt: m['r']);
-          onChange?.call();
-        }
+        // Only the relayer's own signature, over this very voucher, says it settled; a peer's word
+        // would let anyone make a merchant drop a payment it is owed.
+        final s = await _store.get(m['k'] as String);
+        if (s != null && await keepReceipt(_store, s.voucher, m['r'])) onSettled?.call();
       case 'want':
         final forwardable = await _forwardable(), attested = <String>{};
         for (final id in (m['ids'] as List).cast<String>()) {

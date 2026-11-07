@@ -23,13 +23,13 @@ pub struct Attestation {
 }
 
 /// The relayer's word that a voucher settled, for the phones that were offline when it did and
-/// are still carrying it, or still counting it against the payer.
+/// are still carrying it, or still counting it against the payer. Only for a settlement this
+/// relayer sent: a spent nonce alone does not say which of two vouchers on it got paid.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Receipt {
     /// The voucher's signature, `ed25519:<base58>`: how phones and relayer alike tell vouchers apart.
     pub voucher: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tx: Option<String>,
+    pub tx: String,
     /// A height by which it had settled: an attestation read at that height or later already
     /// reflects the payment.
     pub block: u64,

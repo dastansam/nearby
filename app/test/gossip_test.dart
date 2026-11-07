@@ -217,6 +217,27 @@ void main() {
     expect(air.sent('voucher').length, 1, reason: 'a settled voucher is not passed on');
   });
 
+  // The merchant's guard keeps subtracting a voucher with no outcome from the payer's balance, for
+  // ever if it expired unsettled here. So the merchant must still ask after it, although it is
+  // no longer worth passing on.
+  test('an expired voucher still learns it settled', () async {
+    final relayer = await Ed25519().newKeyPair(), key = await Ed25519().newKeyPair();
+    relayerKey = await publicKeyOf(relayer);
+    addTearDown(() => relayerKey = '');
+    final customer = await phone('customer'), merchant = await phone('merchant');
+    final voucher = await signVoucher(key, [Transfer('merchant.near', {usdcToken: '2500000'})],
+        DateTime.now().subtract(const Duration(hours: 1)), makeNonce());
+    await merchant.store.put(voucher, VoucherKind.received);
+    await customer.store.put(voucher, VoucherKind.sent);
+    await customer.store.setOutcome(voucher, Outcome.settled, tx: 'tx1', block: 5000, receipt: await signReceipt(relayer, voucher));
+
+    air.link(customer, merchant);
+    await air.settle();
+
+    expect((await merchant.store.all()).single.outcome, Outcome.settled);
+    expect(air.sent('voucher'), isEmpty, reason: 'expired: not worth passing on, so never sent');
+  });
+
   test('a receipt the trusted relayer did not sign settles nothing', () async {
     // Otherwise anyone in range could make a merchant drop a payment it is owed.
     final relayer = await Ed25519().newKeyPair();

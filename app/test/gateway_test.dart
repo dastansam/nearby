@@ -63,13 +63,25 @@ void main() {
   });
 
   test('keeps the relayer\'s receipt, for phones with no signal that still carry the voucher', () async {
-    final v = await voucher();
+    final relayer = await Ed25519().newKeyPair();
+    relayerKey = await publicKeyOf(relayer);
+    addTearDown(() => relayerKey = '');
+    final v = await voucher(), other = await voucher();
     await store.put(v, VoucherKind.relayed, hops: 2);
-    final receipt = {'payload': '{"voucher":"${v['signature']}","tx":"tx1","block":5000}', 'signature': 'ed25519:sig'};
+    await store.put(other, VoucherKind.relayed, hops: 2);
+    final receipt = await signReceipt(relayer, v, block: 5000);
+    // A receipt that peers would refuse is not worth carrying: one another key signed, or one for another voucher.
+    final receipts = {
+      v['signature']: receipt,
+      other['signature']: await signReceipt(await Ed25519().newKeyPair(), other, block: 5000),
+    };
 
-    await gateway((_) => {'status': 'settled', 'tx': 'tx1', 'block': 5000, 'receipt': receipt}).sync();
+    await gateway((u) => {'status': 'settled', 'tx': 'tx1', 'block': 5000, 'receipt': receipts[u['signature']]}).sync();
 
-    expect(jsonDecode((await store.held())[voucherKey(v)]!), receipt);
+    final held = await store.held();
+    expect(jsonDecode(held[voucherKey(v)]!), receipt);
+    expect(held[voucherKey(other)], isNull);
+    expect((await stored(other)).outcome, Outcome.settled, reason: 'the relayer\'s answer itself still counts');
   });
 
   test('a settled voucher is not uploaded again', () async {

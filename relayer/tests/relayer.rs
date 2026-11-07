@@ -801,6 +801,21 @@ async fn a_gateway_uploads_its_outbox_over_http_and_gets_one_result_per_voucher(
     assert!(relayer_signed(RECEIPT_DOMAIN, &settled["receipt"], payload));
 }
 
+// A payer can sign two vouchers on one nonce for two merchants. The chain shows the nonce spent
+// either way; only the relayer that sent the transaction knows which voucher got paid. A signed
+// "settled" for the other would spread to every phone and tell the unpaid merchant they were paid.
+#[tokio::test]
+async fn no_receipt_is_signed_for_a_voucher_the_relayer_did_not_settle_itself() {
+    let chain = FakeChain::new();
+    let v = pay();
+    chain
+        .state()
+        .used
+        .insert(format!("{}:{}", account_of(&v), v.payload.nonce));
+    let (_, body) = request(&chain, "POST", "/vouchers", Some(json!({ "vouchers": [v] }))).await;
+    assert_eq!(body["results"][0], json!({ "status": "settled", "block": BLOCK }));
+}
+
 // Phones upload when they briefly have a signal, and often lose it before the answer. The gas is
 // spent either way; what must not happen is a transaction sent and nothing remembered about it.
 #[tokio::test]

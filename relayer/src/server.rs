@@ -87,10 +87,18 @@ async fn upload<C: Chain>(
     }
 }
 
-/// The outcome as JSON, with a receipt when the voucher is known to be settled and by which block.
+/// The outcome as JSON, with a receipt when this relayer settled the voucher and knows by which block.
+/// Not when the chain merely shows the nonce spent: a second voucher on that nonce was not paid.
 fn with_receipt(key: &SigningKey, outcome: Outcome, v: &Value) -> Value {
     let mut json = json!(outcome);
-    if let (Outcome::Settled { tx, block: Some(block) }, Some(voucher)) = (&outcome, v["signature"].as_str()) {
+    if let (
+        Outcome::Settled {
+            tx: Some(tx),
+            block: Some(block),
+        },
+        Some(voucher),
+    ) = (&outcome, v["signature"].as_str())
+    {
         let receipt = Receipt {
             voucher: voucher.to_owned(),
             tx: tx.clone(),

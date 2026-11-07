@@ -104,9 +104,13 @@ class Gateway {
       for (final (j, result) in results.indexed) {
         final outcome = const {'settled': Outcome.settled, 'invalid': Outcome.failed}[result['status']];
         if (outcome == null) continue;
-        // The receipt is the relayer's signed word, for phones with no signal that still carry the voucher.
-        await _store.setOutcome(batch[j], outcome,
-            tx: result['tx'] as String?, block: result['block'] as int?, receipt: result['receipt'] as Map<String, dynamic>?);
+        await _store.setOutcome(batch[j], outcome, tx: result['tx'] as String?, block: result['block'] as int?);
+        // The receipt is the relayer's signed word, for phones with no signal that still carry the
+        // voucher. They check it against the key this build pins, so one that fails here would only
+        // be refused by every peer: say so instead of carrying it.
+        if (result['receipt'] != null && !await keepReceipt(_store, batch[j], result['receipt'])) {
+          debugPrint('gateway: the relayer\'s receipt is not signed by the key this build trusts');
+        }
       }
     }
   }
