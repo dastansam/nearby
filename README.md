@@ -30,7 +30,7 @@ flutter build apk --debug \
   --dart-define=RELAYER_KEY=ed25519:<attestation key from GET />
 ```
 
-For iPhones, with Xcode installed and a signing team chosen once in `app/ios/Runner.xcodeproj` (open it in Xcode, Signing & Capabilities): `flutter run -d <iphone>` with the same `--dart-define`s, or `flutter build ipa` for TestFlight.
+For iPhones, with Xcode signed into the developer account: `flutter run -d <iphone>` with the same `--dart-define`s, or `flutter build ipa` for TestFlight. The project carries our signing team; another team changes it in Xcode under Signing & Capabilities.
 
 Debug builds may use plain `http`; release and TestFlight builds need `https`. Without `RELAYER_URL` the app still pays, receives and relays, but never uploads. Without `RELAYER_KEY` there is no relayer whose balance attestations the app trusts, so payees skip the balance check (the receive screen says so) and enforce only the 25 USDC limit and the sequence numbers.
 

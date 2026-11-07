@@ -17,11 +17,34 @@ class Multipeer: NSObject, MCNearbyServiceAdvertiserDelegate, MCNearbyServiceBro
   /// Phones in range that this one dials (see `dial`), by name, and a pending redial for each.
   private var dialable: [String: MCPeerID] = [:]
   private var redials: [String: Timer] = [:]
+  /// Names with an invitation in flight, and names Dart has been told are connected.
+  private var inviting: Set<String> = []
+  private var connected: Set<String> = []
 
   init(messenger: FlutterBinaryMessenger) {
     channel = FlutterMethodChannel(name: "dev.nearby/multipeer", binaryMessenger: messenger)
     super.init()
     channel.setMethodCallHandler { [weak self] call, result in self?.handle(call, result: result) }
+    NotificationCenter.default.addObserver(
+      self, selector: #selector(resume), name: UIApplication.didBecomeActiveNotification, object: nil)
+  }
+
+  /// iOS stops discovery and drops links while the app is in the background, and a phone that
+  /// was in range the whole time is not reported found again. Look afresh on every return.
+  @objc private func resume() {
+    guard let advertiser = advertiser, let browser = browser else { return }
+    forget()
+    advertiser.stopAdvertisingPeer()
+    browser.stopBrowsingForPeers()
+    advertiser.startAdvertisingPeer()
+    browser.startBrowsingForPeers()
+  }
+
+  private func forget() {
+    redials.values.forEach { $0.invalidate() }
+    redials = [:]
+    dialable = [:]
+    inviting = []
   }
 
   private func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -68,9 +91,8 @@ class Multipeer: NSObject, MCNearbyServiceAdvertiserDelegate, MCNearbyServiceBro
   }
 
   private func stop() {
-    redials.values.forEach { $0.invalidate() }
-    redials = [:]
-    dialable = [:]
+    forget()
+    connected = []
     advertiser?.stopAdvertisingPeer()
     browser?.stopBrowsingForPeers()
     session?.disconnect()
@@ -87,8 +109,9 @@ class Multipeer: NSObject, MCNearbyServiceAdvertiserDelegate, MCNearbyServiceBro
 
   private func dial(_ name: String) {
     guard let peer = dialable[name], let session = session, let browser = browser,
-      !session.connectedPeers.contains(where: { $0.displayName == name })
+      !connected.contains(name), !inviting.contains(name)
     else { return }
+    inviting.insert(name)
     browser.invitePeer(peer, to: session, withContext: nil, timeout: 30)
   }
 
@@ -106,32 +129,43 @@ class Multipeer: NSObject, MCNearbyServiceAdvertiserDelegate, MCNearbyServiceBro
 
   func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didReceiveInvitationFromPeer peerID: MCPeerID,
                   withContext context: Data?, invitationHandler: @escaping (Bool, MCSession?) -> Void) {
-    invitationHandler(session != nil, session)
+    DispatchQueue.main.async {
+      let session = advertiser === self.advertiser ? self.session : nil
+      invitationHandler(session != nil, session)
+    }
   }
 
   // MARK: browsing
 
   func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo info: [String: String]?) {
     DispatchQueue.main.async {
-      guard self.dials(peerID) else { return }
+      guard browser === self.browser, self.dials(peerID) else { return }
       self.dialable[peerID.displayName] = peerID
       self.dial(peerID.displayName)
     }
   }
 
   func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {
-    DispatchQueue.main.async { self.dialable[peerID.displayName] = nil }
+    DispatchQueue.main.async {
+      guard browser === self.browser else { return }
+      self.dialable[peerID.displayName] = nil
+    }
   }
 
-  // MARK: the session
+  // MARK: the session. Events from a session `stop` has torn down still arrive and are dropped.
 
   func session(_ session: MCSession, peer peerID: MCPeerID, didChange state: MCSessionState) {
     DispatchQueue.main.async {
+      guard session === self.session else { return }
+      let name = peerID.displayName
       switch state {
-      case .connected: self.channel.invokeMethod("connected", arguments: peerID.displayName)
+      case .connected:
+        self.inviting.remove(name)
+        if self.connected.insert(name).inserted { self.channel.invokeMethod("connected", arguments: name) }
       case .notConnected:
-        self.channel.invokeMethod("disconnected", arguments: peerID.displayName)
-        self.redial(peerID.displayName)
+        self.inviting.remove(name)
+        if self.connected.remove(name) != nil { self.channel.invokeMethod("disconnected", arguments: name) }
+        self.redial(name)
       default: break
       }
     }
@@ -139,6 +173,7 @@ class Multipeer: NSObject, MCNearbyServiceAdvertiserDelegate, MCNearbyServiceBro
 
   func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
     DispatchQueue.main.async {
+      guard session === self.session else { return }
       self.channel.invokeMethod("message", arguments: ["peer": peerID.displayName, "data": FlutterStandardTypedData(bytes: data)])
     }
   }
