@@ -31,10 +31,11 @@ class VoucherStore {
   final Database _db;
   // Sync, so listeners hear about a voucher before put() returns and in the order they were stored.
   final _puts = StreamController<StoredVoucher>.broadcast(sync: true);
+  final _outcomes = StreamController<StoredVoucher>.broadcast(sync: true);
   VoucherStore._(this._db);
 
   static Future<VoucherStore> open([String path = 'nearby.db']) async => VoucherStore._(
-      await openDatabase(path, version: 4, onCreate: (db, _) => _migrate(db, 0), onUpgrade: (db, from, _) => _migrate(db, from)));
+      await openDatabase(path, version: 5, onCreate: (db, _) => _migrate(db, 0), onUpgrade: (db, from, _) => _migrate(db, from)));
 
   /// Brings a database at version [from] (0: empty) up to date, one version's changes at a time.
   static Future<void> _migrate(Database db, int from) async {
@@ -63,10 +64,24 @@ class VoucherStore {
       await db.execute('ALTER TABLE vouchers ADD COLUMN settled_block INTEGER');
       await db.execute('CREATE TABLE attestations (account TEXT PRIMARY KEY, as_of INTEGER NOT NULL, json TEXT NOT NULL)');
     }
+    if (from < 5) {
+      await db.execute('ALTER TABLE vouchers ADD COLUMN receipt TEXT');
+    }
   }
 
   /// Each voucher as it is stored or claimed, so the mesh can offer it and the screen can show it.
   Stream<StoredVoucher> get puts => _puts.stream;
+
+  /// Each voucher as it stands after the relayer's answer about it is recorded, so a screen showing
+  /// it as pending can show it settled, or not.
+  Stream<StoredVoucher> get outcomes => _outcomes.stream;
+
+  /// Vouchers the relayer turned down for now, with its reason (the payer's balance is short, say).
+  /// Nothing is stored: the voucher may still settle, and is uploaded again. The screen showing it
+  /// as pending should say what the chain said.
+  Stream<({Map<String, dynamic> voucher, String reason})> get rejections => _rejections.stream;
+  final _rejections = StreamController<({Map<String, dynamic> voucher, String reason})>.broadcast(sync: true);
+  void noteRejection(Map<String, dynamic> voucher, String reason) => _rejections.add((voucher: voucher, reason: reason));
 
   /// Stores a voucher under its signer and nonce. Returns false, changing nothing, if that slot
   /// is taken: the chain settles it once, so a voucher shown again is the same payment, not a
@@ -95,18 +110,29 @@ class VoucherStore {
       if (claim) await txn.update('vouchers', {'kind': kind.name}, where: 'key = ?', whereArgs: [key]);
       return claim ? held.single['hops'] as int : null;
     });
-    if (storedHops != null) _puts.add((kind: kind, hops: storedHops, voucher: voucher, outcome: null, tx: null, settledBlock: null));
-    return storedHops != null;
+    if (storedHops == null) return false;
+    // A claimed voucher may have been answered about already: the gateway uploads it as soon as it
+    // is carried. Tell it as it stands.
+    _puts.add(kind == VoucherKind.relayed
+        ? (kind: kind, hops: storedHops, voucher: voucher, outcome: null, tx: null, settledBlock: null)
+        : (await get(key))!);
+    return true;
   }
 
-  /// Records the relayer's final answer for [voucher], with the settling [tx] and [block] if it
-  /// knew them. The row stays, so the mesh still counts the voucher as held and does not fetch it
-  /// again. A voucher recorded as settled stays settled, and keeps the transaction and block it
-  /// has; ones it lacks can still be filled in.
-  Future<void> setOutcome(Map<String, dynamic> voucher, Outcome outcome, {String? tx, int? block}) => _db.rawUpdate(
-      "UPDATE vouchers SET outcome = CASE outcome WHEN 'settled' THEN outcome ELSE ? END, "
-      'tx = COALESCE(tx, ?), settled_block = COALESCE(settled_block, ?) WHERE key = ?',
-      [outcome.name, outcome == Outcome.settled ? tx : null, outcome == Outcome.settled ? block : null, voucherKey(voucher)]);
+  /// Records the relayer's final answer for [voucher], with the settling [tx], [block] and signed
+  /// [receipt] (see [held]) if it gave them. The row stays, so the mesh still counts the voucher as
+  /// held and does not fetch it again. A voucher recorded as settled stays settled, and keeps the
+  /// transaction, block and receipt it has; ones it lacks can still be filled in.
+  Future<void> setOutcome(Map<String, dynamic> voucher, Outcome outcome,
+      {String? tx, int? block, Map<String, dynamic>? receipt}) async {
+    final settled = outcome == Outcome.settled, key = voucherKey(voucher);
+    final changed = await _db.rawUpdate(
+        "UPDATE vouchers SET outcome = CASE outcome WHEN 'settled' THEN outcome ELSE ? END, tx = COALESCE(tx, ?), "
+        'settled_block = COALESCE(settled_block, ?), receipt = COALESCE(receipt, ?) WHERE key = ?',
+        [outcome.name, settled ? tx : null, settled ? block : null, settled && receipt != null ? jsonEncode(receipt) : null, key]);
+    if (changed == 0) return;
+    _outcomes.add((await get(key))!);
+  }
 
   /// Keeps [signed] as the attestation for [account] unless a newer one is already held.
   Future<void> saveAttestation(String account, DateTime asOf, Map<String, dynamic> signed) => _db.rawInsert(
@@ -125,7 +151,13 @@ class VoucherStore {
       // A range, which the primary key index can answer; LIKE would read every row. ";" follows ":".
       _select(where: 'key >= ? AND key < ?', whereArgs: ['$signer:', '$signer;']);
 
-  Future<Set<String>> keys() async => {for (final r in await _db.query('vouchers', columns: ['key'])) r['key'] as String};
+  /// The voucher stored under [key], if any.
+  Future<StoredVoucher?> get(String key) async => (await _select(where: 'key = ?', whereArgs: [key])).firstOrNull;
+
+  /// Every voucher key held, with the relayer's signed receipt for it where there is one, as the JSON
+  /// text it was given in. Two columns only: the mesh asks this for every "have" it hears.
+  Future<Map<String, String?>> held() async =>
+      {for (final r in await _db.query('vouchers', columns: ['key', 'receipt'])) r['key'] as String: r['receipt'] as String?};
 
   /// Newest first.
   Future<List<StoredVoucher>> all() => _select();

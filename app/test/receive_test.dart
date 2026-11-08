@@ -50,5 +50,45 @@ void main() {
     expect(find.text('Paid, pending settlement'), findsOneWidget);
     expect(await kindOf(ours), VoucherKind.received);
     expect(await kindOf(other), VoucherKind.relayed, reason: 'still only carried, not counted as this sale');
+
+    // With a signal, the gateway uploads the payment at once (gateway.dart). The screen is still up,
+    // and the chain's word is the one check the offline guards cannot make: the merchant should see
+    // it before the customer leaves, whether the chain is short of the payer's funds for now, has
+    // paid, or never will. The other customer's settlement is not this sale's.
+    await tester.runAsync(() => store.setOutcome(other, Outcome.settled, tx: 'tx0', block: 1));
+    await tester.pump();
+    expect(find.text('Paid, pending settlement'), findsOneWidget);
+    store.noteRejection(ours, 'insufficient balance or overflow');
+    await tester.pump();
+    expect(find.text('Paid, but the chain turns it down for now'), findsOneWidget);
+    expect(find.textContaining('insufficient balance or overflow'), findsOneWidget);
+    await tester.runAsync(() => store.setOutcome(ours, Outcome.settled, tx: 'tx1', block: 2));
+    await tester.pump();
+    expect(find.text('Paid and settled on chain'), findsOneWidget);
+    expect(find.textContaining('insufficient balance'), findsNothing, reason: 'the chain has since paid');
+  });
+
+  // The gateway uploads a voucher as soon as it is carried, before the payee's checks finish, so the
+  // chain's answer can be in the store before the payment is claimed as this sale's. It must not be lost.
+  testWidgets('an answer that came in before the payment was claimed is shown', (tester) async {
+    final store = (await tester.runAsync(() => VoucherStore.open(inMemoryDatabasePath)))!;
+    await tester.pumpWidget(MaterialApp(home: ReceiveScreen(accountId: 'merchant.near', store: store)));
+    await tester.enterText(find.byType(TextField), '2.50');
+    await tester.tap(find.text('Show QR'));
+    await tester.pump();
+    final qr = tester.widget<QrImageView>(find.byType(QrImageView)).key as ValueKey<String>;
+    final request = PaymentRequest.decode(qr.value)!;
+
+    await tester.runAsync(() async {
+      final v = await signPayment(await Ed25519().newKeyPair(), request);
+      // Carried in and answered about (its nonce was spent by another voucher) before being judged.
+      await store.put(v, VoucherKind.relayed, hops: 1);
+      await store.setOutcome(v, Outcome.failed);
+    });
+    for (var i = 0; i < 20; i++) {
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
+      await tester.pump();
+    }
+    expect(find.text('Paid, but the chain refused it'), findsOneWidget);
   });
 }

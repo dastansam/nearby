@@ -58,17 +58,29 @@ pub trait Chain: Send + Sync + 'static {
     fn simulate(&self, v: &SignedVoucher) -> impl Future<Output = Result<(), ChainError>> + Send;
     /// Settles the voucher, paying gas, and returns the transaction hash. Refused if the contract turns it down.
     fn execute(&self, v: &SignedVoucher) -> impl Future<Output = Result<String, ChainError>> + Send;
+    /// yoctoNEAR backing the account's payments in the bond contract: "0" when there is none.
+    fn bond_of(&self, account: &str) -> impl Future<Output = Result<String, ChainError>> + Send;
+    /// Hands a pair of equivocating vouchers signed by `signer` to the bond contract, paying gas,
+    /// and returns the transaction hash. Refused if the key has nothing at stake or was slashed
+    /// already, or if the contract finds the pair no proof.
+    fn slash(
+        &self,
+        signer: &str,
+        a: &SignedVoucher,
+        b: &SignedVoucher,
+    ) -> impl Future<Output = Result<String, ChainError>> + Send;
 }
 
-/// The most gas one transaction may use; execute_intents gets all of it and is charged only what it burns.
+/// The most gas one transaction may use; the call gets all of it and is charged only what it burns.
 const GAS: u64 = 300_000_000_000_000;
 
-/// intents.near on mainnet, over JSON-RPC.
+/// intents.near, and the bond contract if there is one, on mainnet over JSON-RPC.
 pub struct NearChain {
     http: reqwest::Client,
     rpc: String,
     account: String,
     key: SigningKey,
+    bond_contract: String,
     /// The last access-key nonce this process used. The node answering a view can be a block
     /// behind the one that ran our previous transaction, and would hand the same nonce out again.
     last_nonce: AtomicU64,
@@ -76,7 +88,7 @@ pub struct NearChain {
 
 impl NearChain {
     /// `account` pays the gas with `key`, one of its access keys.
-    pub fn new(account: String, key: SigningKey, rpc: Option<String>) -> Self {
+    pub fn new(account: String, key: SigningKey, rpc: Option<String>, bond_contract: String) -> Self {
         Self {
             // send_tx answers only once the transaction has run, which takes a few blocks.
             http: reqwest::Client::builder()
@@ -86,15 +98,19 @@ impl NearChain {
             rpc: rpc.unwrap_or_else(|| "https://rpc.mainnet.near.org".into()),
             account,
             key,
+            bond_contract,
             last_nonce: AtomicU64::new(0),
         }
     }
 
-    /// The relayer account from RELAYER_ACCOUNT and RELAYER_KEY, on NEAR_RPC if that is set.
+    /// The relayer account from RELAYER_ACCOUNT and RELAYER_KEY, the bond contract from
+    /// BOND_CONTRACT, on NEAR_RPC if that is set.
     pub fn from_env() -> Result<Self, &'static str> {
-        let usage = "set RELAYER_ACCOUNT and RELAYER_KEY (ed25519:...)";
+        let usage = "set RELAYER_ACCOUNT, RELAYER_KEY (ed25519:...) and BOND_CONTRACT";
         let key = env("RELAYER_KEY").as_deref().and_then(secret_key).ok_or(usage)?;
-        Ok(Self::new(env("RELAYER_ACCOUNT").ok_or(usage)?, key, env("NEAR_RPC")))
+        let account = env("RELAYER_ACCOUNT").ok_or(usage)?;
+        let bond_contract = env("BOND_CONTRACT").ok_or(usage)?;
+        Ok(Self::new(account, key, env("NEAR_RPC"), bond_contract))
     }
 
     async fn call(&self, method: &str, params: Value) -> Result<Value, ChainError> {
@@ -119,12 +135,12 @@ impl NearChain {
         }
     }
 
-    /// A view call on intents.near, with the height it ran at.
-    async fn view(&self, method: &str, args: Value) -> Result<At<Value>, ChainError> {
+    /// A view call, with the height it ran at.
+    async fn view(&self, contract: &str, method: &str, args: Value) -> Result<At<Value>, ChainError> {
         let query = json!({
             "request_type": "call_function",
             "finality": "optimistic",
-            "account_id": VERIFYING_CONTRACT,
+            "account_id": contract,
             "method_name": method,
             "args_base64": STANDARD.encode(args.to_string()),
         });
@@ -136,41 +152,22 @@ impl NearChain {
             _ => Err(ChainError::Unknown(format!("unexpected answer to {method}: {result}"))),
         }
     }
-}
 
-impl Chain for NearChain {
-    async fn balance_of(&self, account: &str, token: &str) -> Result<At<String>, ChainError> {
-        let At { value, block } = self
-            .view("mt_balance_of", json!({ "account_id": account, "token_id": token }))
+    /// A yoctoNEAR amount the bond contract reports for `account`, as decimal text.
+    async fn yocto(&self, method: &str, account: &str) -> Result<String, ChainError> {
+        let At { value, .. } = self
+            .view(&self.bond_contract, method, json!({ "account": account }))
             .await
             .map_err(ChainError::not_a_refusal)?;
-        let balance = value
+        value
             .as_str()
-            .ok_or_else(|| ChainError::Unknown(format!("balance is not a string: {value}")))?;
-        Ok(At {
-            value: balance.to_owned(),
-            block,
-        })
+            .map(str::to_owned)
+            .ok_or_else(|| ChainError::Unknown(format!("{method} is not a string: {value}")))
     }
 
-    async fn is_nonce_used(&self, account: &str, nonce_base64: &str) -> Result<At<bool>, ChainError> {
-        let At { value, block } = self
-            .view("is_nonce_used", json!({ "account_id": account, "nonce": nonce_base64 }))
-            .await
-            .map_err(ChainError::not_a_refusal)?;
-        let used = value
-            .as_bool()
-            .ok_or_else(|| ChainError::Unknown(format!("is_nonce_used is not a boolean: {value}")))?;
-        Ok(At { value: used, block })
-    }
-
-    async fn simulate(&self, v: &SignedVoucher) -> Result<(), ChainError> {
-        self.view("simulate_intents", json!({ "signed": [v] }))
-            .await
-            .map(|_| ())
-    }
-
-    async fn execute(&self, v: &SignedVoucher) -> Result<String, ChainError> {
+    /// Calls `method` on `contract` with `args` and no deposit, paying gas, and returns the
+    /// transaction hash once it has run. Refused if the call failed.
+    async fn send(&self, contract: &str, method: &str, args: Value) -> Result<String, ChainError> {
         let unexpected = |what: &str, got: &Value| ChainError::Unknown(format!("unexpected {what}: {got}"));
         let public_key = self.key.verifying_key().to_bytes();
         let access = json!({ "request_type": "view_access_key", "finality": "optimistic", "account_id": self.account, "public_key": tag(&public_key) });
@@ -186,7 +183,7 @@ impl Chain for NearChain {
         let next = |last: u64| Some(last.max(seen) + 1);
         let nonce = self
             .last_nonce
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, next)
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, next)
             .map(|last| last.max(seen) + 1)
             .expect("always Some");
         let block_hash: [u8; 32] = block["header"]["hash"]
@@ -194,8 +191,16 @@ impl Chain for NearChain {
             .and_then(untag)
             .ok_or_else(|| unexpected("block", &block))?;
 
-        let args = json!({ "signed": [v] }).to_string();
-        let transaction = execute_intents(&self.account, &public_key, nonce, &block_hash, args.as_bytes());
+        let args = args.to_string();
+        let transaction = function_call(
+            &self.account,
+            &public_key,
+            nonce,
+            &block_hash,
+            contract,
+            method,
+            args.as_bytes(),
+        );
         let sent = json!({ "signed_tx_base64": STANDARD.encode(sign(&self.key, transaction)), "wait_until": "EXECUTED_OPTIMISTIC" });
         let outcome = self.call("send_tx", sent).await?;
         if let Some(failure) = outcome["status"].get("Failure") {
@@ -210,6 +215,75 @@ impl Chain for NearChain {
             (Some(_), Some(hash)) => Ok(hash.to_owned()),
             _ => Err(unexpected("transaction outcome", &outcome)),
         }
+    }
+}
+
+impl Chain for NearChain {
+    async fn balance_of(&self, account: &str, token: &str) -> Result<At<String>, ChainError> {
+        let At { value, block } = self
+            .view(
+                VERIFYING_CONTRACT,
+                "mt_balance_of",
+                json!({ "account_id": account, "token_id": token }),
+            )
+            .await
+            .map_err(ChainError::not_a_refusal)?;
+        let balance = value
+            .as_str()
+            .ok_or_else(|| ChainError::Unknown(format!("balance is not a string: {value}")))?;
+        Ok(At {
+            value: balance.to_owned(),
+            block,
+        })
+    }
+
+    async fn is_nonce_used(&self, account: &str, nonce_base64: &str) -> Result<At<bool>, ChainError> {
+        let At { value, block } = self
+            .view(
+                VERIFYING_CONTRACT,
+                "is_nonce_used",
+                json!({ "account_id": account, "nonce": nonce_base64 }),
+            )
+            .await
+            .map_err(ChainError::not_a_refusal)?;
+        let used = value
+            .as_bool()
+            .ok_or_else(|| ChainError::Unknown(format!("is_nonce_used is not a boolean: {value}")))?;
+        Ok(At { value: used, block })
+    }
+
+    async fn simulate(&self, v: &SignedVoucher) -> Result<(), ChainError> {
+        self.view(VERIFYING_CONTRACT, "simulate_intents", json!({ "signed": [v] }))
+            .await
+            .map(|_| ())
+    }
+
+    async fn execute(&self, v: &SignedVoucher) -> Result<String, ChainError> {
+        self.send(VERIFYING_CONTRACT, "execute_intents", json!({ "signed": [v] }))
+            .await
+    }
+
+    async fn bond_of(&self, account: &str) -> Result<String, ChainError> {
+        self.yocto("bond_of", account).await
+    }
+
+    async fn slash(&self, signer: &str, a: &SignedVoucher, b: &SignedVoucher) -> Result<String, ChainError> {
+        // Free views first: pairs are free to make for anyone with a key, and a transaction for a
+        // key with nothing to take would cost this relayer gas for nothing. A key already banned
+        // was slashed by a transaction whose answer never reached us, or by someone else.
+        if self.yocto("at_stake", signer).await? == "0" {
+            let banned = self
+                .view(&self.bond_contract, "is_banned", json!({ "account": signer }))
+                .await
+                .map_err(ChainError::not_a_refusal)?;
+            let why = if banned.value == true {
+                "already slashed"
+            } else {
+                "nothing at stake"
+            };
+            return Err(ChainError::Refused(why.into()));
+        }
+        self.send(&self.bond_contract, "slash", json!({ "a": a, "b": b })).await
     }
 }
 
@@ -257,8 +331,16 @@ pub fn secret_key(tagged: &str) -> Option<SigningKey> {
     SigningKey::from_keypair_bytes(&pair).ok()
 }
 
-/// Borsh of a NEAR transaction that calls execute_intents on intents.near with `args`, no deposit.
-fn execute_intents(signer: &str, public_key: &[u8; 32], nonce: u64, block_hash: &[u8; 32], args: &[u8]) -> Vec<u8> {
+/// Borsh of a NEAR transaction with one function call, no deposit.
+fn function_call(
+    signer: &str,
+    public_key: &[u8; 32],
+    nonce: u64,
+    block_hash: &[u8; 32],
+    contract: &str,
+    method: &str,
+    args: &[u8],
+) -> Vec<u8> {
     let mut tx = Vec::new();
     let bytes = |tx: &mut Vec<u8>, b: &[u8]| {
         tx.extend((b.len() as u32).to_le_bytes());
@@ -268,11 +350,11 @@ fn execute_intents(signer: &str, public_key: &[u8; 32], nonce: u64, block_hash: 
     tx.push(0); // key type: ed25519
     tx.extend(public_key);
     tx.extend(nonce.to_le_bytes());
-    bytes(&mut tx, VERIFYING_CONTRACT.as_bytes());
+    bytes(&mut tx, contract.as_bytes());
     tx.extend(block_hash);
     tx.extend(1u32.to_le_bytes()); // one action
     tx.push(2); // action: FunctionCall
-    bytes(&mut tx, b"execute_intents");
+    bytes(&mut tx, method.as_bytes());
     bytes(&mut tx, args);
     tx.extend(GAS.to_le_bytes());
     tx.extend(0u128.to_le_bytes()); // deposit
@@ -299,11 +381,13 @@ mod tests {
             "ed25519:4VZdodJgBy6dxMgm45zusmRzrPvKtiumu5YrK9RLPJAVbW5qTGHqsYeFR8HsFWEh71pjwJffSPkmficrRvk3p3a",
         )
         .unwrap();
-        let tx = execute_intents(
+        let tx = function_call(
             "relayer.near",
             key.verifying_key().as_bytes(),
             123456789012345,
             &[9; 32],
+            VERIFYING_CONTRACT,
+            "execute_intents",
             br#"{"signed":[{"a":1}]}"#,
         );
         assert_eq!(hex::encode(&tx), "0c00000072656c617965722e6e65617200ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d179df0d86487000000c000000696e74656e74732e6e656172090909090909090909090909090909090909090909090909090909090909090901000000020f000000657865637574655f696e74656e7473140000007b227369676e6564223a5b7b2261223a317d5d7d00c06e31d910010000000000000000000000000000000000");

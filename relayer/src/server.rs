@@ -1,9 +1,9 @@
 //! HTTP face of the relayer. Nothing here needs authentication: vouchers authorize themselves by
 //! signature, balances are public, and an attestation is only as good as the relayer's signature on it.
-use crate::attestation::{sign_attestation, Attestation};
+use crate::attestation::{sign_attestation, sign_receipt, Attestation, Receipt};
 use crate::chain::Chain;
-use crate::settle::Settler;
-use crate::voucher::{iso, tag, SignedVoucher, USDC_TOKEN};
+use crate::settle::{Outcome, Proof, Settler};
+use crate::voucher::{iso, tag, USDC_TOKEN};
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -57,7 +57,8 @@ struct Upload {
     vouchers: Vec<Value>,
 }
 
-/// A gateway phone uploads what it carries. One result per voucher, in order.
+/// A gateway phone uploads what it carries. One result per voucher, in order. A settled one comes
+/// with a signed receipt, for the phones still offline that carry the voucher.
 async fn upload<C: Chain>(
     State(relayer): State<Arc<Relayer<C>>>,
     body: Result<Json<Upload>, JsonRejection>,
@@ -66,7 +67,15 @@ async fn upload<C: Chain>(
         Ok(Json(Upload { vouchers })) if vouchers.len() <= MAX_VOUCHERS => {
             // In a task of its own: a phone that loses its signal mid-upload drops this request, and
             // that must not stop a settlement halfway, with a transaction sent and nothing recorded.
-            match tokio::spawn(async move { relayer.settler.settle(&vouchers).await }).await {
+            let settling = tokio::spawn(async move {
+                let outcomes = relayer.settler.settle(&vouchers).await;
+                outcomes
+                    .into_iter()
+                    .zip(&vouchers)
+                    .map(|(outcome, v)| with_receipt(&relayer.attestation_key, outcome, v))
+                    .collect::<Vec<Value>>()
+            });
+            match settling.await {
                 Ok(results) => Json(json!({ "results": results })).into_response(),
                 Err(_) => refuse(StatusCode::INTERNAL_SERVER_ERROR, "settlement stopped unexpectedly"),
             }
@@ -78,29 +87,54 @@ async fn upload<C: Chain>(
     }
 }
 
+/// The outcome as JSON, with a receipt when this relayer settled the voucher and knows by which block.
+/// Not when the chain merely shows the nonce spent: a second voucher on that nonce was not paid.
+fn with_receipt(key: &SigningKey, outcome: Outcome, v: &Value) -> Value {
+    let mut json = json!(outcome);
+    if let (
+        Outcome::Settled {
+            tx: Some(tx),
+            block: Some(block),
+        },
+        Some(voucher),
+    ) = (&outcome, v["signature"].as_str())
+    {
+        let receipt = Receipt {
+            voucher: voucher.to_owned(),
+            tx: tx.clone(),
+            block: *block,
+        };
+        json["receipt"] = json!(sign_receipt(key, &receipt));
+    }
+    json
+}
+
 /// What an offline account holds right now, signed, for the app to show payees while offline.
 async fn attest<C: Chain>(State(relayer): State<Arc<Relayer<C>>>, Path(account): Path<String>) -> Response {
     // Offline accounts are implicit ones: the hex of the key that signs their vouchers.
     if account.len() != 64 || !account.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
         return refuse(StatusCode::BAD_REQUEST, "not an implicit account");
     }
-    match relayer.chain.balance_of(&account, USDC_TOKEN).await {
-        Ok(read) => {
-            let attestation = Attestation {
-                account,
-                token: USDC_TOKEN.into(),
-                balance: read.value,
-                bond: "0".into(), // no bond contract yet
-                as_of: iso((relayer.now)()),
-                block: read.block,
-            };
-            Json(sign_attestation(&relayer.attestation_key, &attestation)).into_response()
-        }
-        Err(e) => refuse(StatusCode::INTERNAL_SERVER_ERROR, e.reason()),
-    }
+    let asked = tokio::try_join!(
+        relayer.chain.balance_of(&account, USDC_TOKEN),
+        relayer.chain.bond_of(&account)
+    );
+    let (read, bond) = match asked {
+        Ok(answers) => answers,
+        Err(e) => return refuse(StatusCode::INTERNAL_SERVER_ERROR, e.reason()),
+    };
+    let attestation = Attestation {
+        account,
+        token: USDC_TOKEN.into(),
+        balance: read.value,
+        bond,
+        as_of: iso((relayer.now)()),
+        block: read.block,
+    };
+    Json(sign_attestation(&relayer.attestation_key, &attestation)).into_response()
 }
 
-/// Proofs of double-spending seen so far, for whoever submits them to the bond contract.
-async fn equivocations<C: Chain>(State(relayer): State<Arc<Relayer<C>>>) -> Json<Vec<(SignedVoucher, SignedVoucher)>> {
+/// Proofs of double-spending seen so far, with the slashing transaction each one led to.
+async fn equivocations<C: Chain>(State(relayer): State<Arc<Relayer<C>>>) -> Json<Vec<Proof>> {
     Json(relayer.settler.equivocations().await)
 }

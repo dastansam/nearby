@@ -43,7 +43,7 @@ class _HomeScreenState extends State<HomeScreen> {
   List<StoredVoucher> _vouchers = [];
   Object? _loadError;
   Gossip? _gossip;
-  StreamSubscription<void>? _puts;
+  StreamSubscription<void>? _puts, _outcomes;
   Timer? _reload;
   int _carried = 0;
   Gateway? _gateway;
@@ -63,6 +63,7 @@ class _HomeScreenState extends State<HomeScreen> {
   void dispose() {
     _gossip?.stop();
     _puts?.cancel();
+    _outcomes?.cancel();
     _reload?.cancel();
     _gateway?.stop();
     super.dispose();
@@ -87,11 +88,13 @@ class _HomeScreenState extends State<HomeScreen> {
     }
     if (!mounted) return;
     // Paying and receiving by QR work without the mesh, so a mesh failure is shown, not fatal.
-    // A phone met after a while hands over its vouchers in a burst; one reload covers the burst.
-    _puts = _store.puts.listen((_) => _reload ??= Timer(const Duration(milliseconds: 300), () {
+    // A phone met after a while hands over its vouchers and receipts in a burst; one reload covers the burst.
+    void reloadSoon(StoredVoucher _) => _reload ??= Timer(const Duration(milliseconds: 300), () {
           _reload = null;
           _reloadVouchers();
-        }));
+        });
+    _puts = _store.puts.listen(reloadSoon);
+    _outcomes = _store.outcomes.listen(reloadSoon);
     if (relayerUrl.isNotEmpty) {
       _gateway = Gateway(_store, relayerUrl, account: wallet.accountId, onChange: _reloadVouchers)..start();
     }

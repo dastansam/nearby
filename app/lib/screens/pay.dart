@@ -51,6 +51,7 @@ Future<void> pay(BuildContext context, Wallet wallet, VoucherStore store) async 
 const _whyNot = {
   'attestation': 'Go online once so the app can load your offline balance',
   'stale': 'Go online once so the app can load your offline balance',
+  'bond': 'Lock a bond of at least $minimumBondNear NEAR first (see the README), then go online once',
   'balance': 'Not enough offline balance',
 };
 

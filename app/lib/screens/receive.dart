@@ -52,9 +52,11 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
   final _amount = TextEditingController();
   PaymentRequest? _request;
   bool _paid = false;
+  Outcome? _outcome; // the chain's final answer about the payment, once this phone has a signal
+  String? _rejectedFor; // or why the chain turns it down for now
   String? _rejection; // why the last scanned voucher was refused
   bool _scanning = false; // a second tap must not stack a second scanner
-  late final StreamSubscription<void> _mesh;
+  late final StreamSubscription<void> _mesh, _claims, _outcomes, _rejections;
 
   @override
   void initState() {
@@ -65,6 +67,25 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       final request = _request;
       if (request == null || p.kind != VoucherKind.relayed || !namesRequest(p.voucher, request)) return;
       _show(await acceptPayment(widget.store, request, jsonEncode({'v': p.voucher})));
+    });
+    // With a signal, the gateway uploads the payment the moment it is stored, and the chain's answer
+    // beats the customer out of the door: the live check that the offline guards stand in for. It may
+    // even come before the payment is claimed as ours, while it is only carried: put() tells it then.
+    _claims = widget.store.puts.listen(_noteOutcome);
+    _outcomes = widget.store.outcomes.listen(_noteOutcome);
+    _rejections = widget.store.rejections.listen((r) {
+      if (_ours(r.voucher)) setState(() => _rejectedFor = r.reason);
+    });
+  }
+
+  /// Whether [voucher] pays the request on screen, as this payee's own.
+  bool _ours(Map<String, dynamic> voucher) => _request != null && namesRequest(voucher, _request!);
+
+  void _noteOutcome(StoredVoucher s) {
+    if (s.kind != VoucherKind.received || !_ours(s.voucher)) return;
+    setState(() {
+      _outcome = s.outcome;
+      if (s.outcome != null) _rejectedFor = null;
     });
   }
 
@@ -84,6 +105,9 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
   @override
   void dispose() {
     _mesh.cancel();
+    _claims.cancel();
+    _outcomes.cancel();
+    _rejections.cancel();
     _amount.dispose();
     super.dispose();
   }
@@ -119,6 +143,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
   Widget build(BuildContext context) {
     final request = _request;
     final theme = Theme.of(context);
+    final refused = _outcome == Outcome.failed || (_outcome == null && _rejectedFor != null);
     return Scaffold(
       appBar: AppBar(title: const Text('Receive')),
       body: Padding(
@@ -138,14 +163,28 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                 Text(formatUsdc(request.amount), style: theme.textTheme.headlineMedium),
                 const SizedBox(height: 16),
                 if (_paid)
-                  Icon(Icons.check_circle, size: 160, color: theme.colorScheme.primary)
+                  Icon(refused ? Icons.error : Icons.check_circle,
+                      size: 160, color: refused ? theme.colorScheme.error : theme.colorScheme.primary)
                 else
                   QrImageView(key: ValueKey(request.encode()), data: request.encode(), size: 260, backgroundColor: Colors.white),
                 const SizedBox(height: 16),
                 if (_paid) ...[
-                  Text('Paid, pending settlement', style: theme.textTheme.titleLarge),
+                  Text(
+                      switch (_outcome) {
+                        Outcome.settled => 'Paid and settled on chain',
+                        Outcome.failed => 'Paid, but the chain refused it',
+                        null => _rejectedFor == null ? 'Paid, pending settlement' : 'Paid, but the chain turns it down for now',
+                      },
+                      style: theme.textTheme.titleLarge?.copyWith(color: refused ? theme.colorScheme.error : null)),
+                  if (_outcome == Outcome.failed)
+                    const Text('The voucher is signed but intents.near will not pay it: do not hand over the goods.',
+                        textAlign: TextAlign.center)
+                  else if (refused)
+                    Text('intents.near says: $_rejectedFor. It settles only if that changes, so do not count on it.',
+                        textAlign: TextAlign.center),
                   // Said out loud: without a relayer key this build cannot tell a funded payer from an empty one.
-                  if (relayerKey.isEmpty) const Text('The payer\'s balance was not checked: this build trusts no relayer'),
+                  if (relayerKey.isEmpty && _outcome == null)
+                    const Text('The payer\'s balance was not checked: this build trusts no relayer'),
                 ]
                 else if (_rejection != null) ...[
                   Text('Rejected: ${guardRefusals[_rejection] ?? _rejection}',

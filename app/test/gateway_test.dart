@@ -62,6 +62,28 @@ void main() {
     expect((await stored(carried)).outcome, Outcome.settled);
   });
 
+  test('keeps the relayer\'s receipt, for phones with no signal that still carry the voucher', () async {
+    final relayer = await Ed25519().newKeyPair();
+    relayerKey = await publicKeyOf(relayer);
+    addTearDown(() => relayerKey = '');
+    final v = await voucher(), other = await voucher();
+    await store.put(v, VoucherKind.relayed, hops: 2);
+    await store.put(other, VoucherKind.relayed, hops: 2);
+    final receipt = await signReceipt(relayer, v, block: 5000);
+    // A receipt that peers would refuse is not worth carrying: one another key signed, or one for another voucher.
+    final receipts = {
+      v['signature']: receipt,
+      other['signature']: await signReceipt(await Ed25519().newKeyPair(), other, block: 5000),
+    };
+
+    await gateway((u) => {'status': 'settled', 'tx': 'tx1', 'block': 5000, 'receipt': receipts[u['signature']]}).sync();
+
+    final held = await store.held();
+    expect(jsonDecode(held[voucherKey(v)]!), receipt);
+    expect(held[voucherKey(other)], isNull);
+    expect((await stored(other)).outcome, Outcome.settled, reason: 'the relayer\'s answer itself still counts');
+  });
+
   test('a settled voucher is not uploaded again', () async {
     // Every upload costs the relayer chain lookups, and phones sync every half minute.
     await store.put(await voucher(), VoucherKind.sent);
@@ -98,9 +120,14 @@ void main() {
       unlucky['signature']: {'status': 'error', 'reason': 'fetch failed'},
     };
     final relayer = gateway((v) => answers[v['signature']]!);
+    // Not stored, but said: a merchant with the customer still there must hear the balance is short.
+    final heard = <String>[];
+    final sub = store.rejections.listen((r) => heard.add('${r.voucher['signature']}: ${r.reason}'));
+    addTearDown(sub.cancel);
 
     await relayer.sync();
     expect([(await stored(short)).outcome, (await stored(unlucky)).outcome], [null, null]);
+    expect(heard, ['${short['signature']}: insufficient balance or overflow']);
 
     answers = {for (final s in answers.keys) s: {'status': 'settled', 'tx': 'tx9'}};
     await relayer.sync();

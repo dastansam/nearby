@@ -40,8 +40,14 @@ void main() {
   StoredVoucher seen(Map<String, dynamic> v, {Outcome? outcome, int? settledBlock}) =>
       (kind: VoucherKind.relayed, hops: 1, voucher: v, outcome: outcome, tx: null, settledBlock: settledBlock);
 
-  Attestation attested(String balance, {DateTime? asOf, String? account}) =>
-      (account: account ?? payerId, token: usdcToken, balance: BigInt.parse(balance), asOf: asOf ?? readAt, block: readBlock);
+  Attestation attested(String balance, {DateTime? asOf, String? account, BigInt? bond}) => (
+        account: account ?? payerId,
+        token: usdcToken,
+        balance: BigInt.parse(balance),
+        bond: bond ?? minimumBond,
+        asOf: asOf ?? readAt,
+        block: readBlock
+      );
 
   String? refusal(Map<String, dynamic> v, {Attestation? a, List<StoredVoucher> theirs = const []}) =>
       checkGuards(v, attestation: a, theirs: theirs, now: now);
@@ -118,6 +124,28 @@ void main() {
       final v = await pay('2500000');
       expect(refusal(v, a: attested('3000000', asOf: now.subtract(const Duration(hours: 25)))), 'stale');
       expect(refusal(v, a: attested('3000000', asOf: now.subtract(const Duration(hours: 23)))), isNull);
+    });
+
+    // Layer 3: without a bond, a double-spend costs the payer nothing but a key. The relayer
+    // reports 0 for a key that is banned or whose bond is being withdrawn, so this covers those too.
+    test('refuses a payer who has not bonded enough NEAR against cheating', () async {
+      final v = await pay('2500000');
+      expect(refusal(v, a: attested('3000000', bond: minimumBond - BigInt.one)), 'bond');
+      expect(refusal(v, a: attested('3000000', bond: BigInt.zero)), 'bond');
+      expect(refusal(v, a: attested('3000000', bond: minimumBond)), isNull);
+    });
+
+    // The bond can be withdrawn 7 days after notice. A voucher valid for longer could be held back
+    // and settled once there is nothing left to slash.
+    test('refuses a payment that stays valid for longer than the app ever signs', () async {
+      final a = attested('9000000');
+      final request = PaymentRequest(receiverId: 'merchant.near', token: usdcToken, amount: '1000000', id: newRequestId());
+      final longLived = await signVoucher(payer, [Transfer('merchant.near', {usdcToken: '1000000'}, memo: 'req:${request.id} seq:1 prev:00')],
+          now.add(const Duration(hours: 74)), makeNonce());
+      expect(refusal(longLived, a: a), 'deadline');
+      final usual = await signVoucher(payer, [Transfer('merchant.near', {usdcToken: '1000000'}, memo: 'req:${request.id} seq:1 prev:00')],
+          now.add(const Duration(hours: 72)), makeNonce());
+      expect(refusal(usual, a: a), isNull);
     });
 
     test('refuses a payment over the cap however large the balance', () async {

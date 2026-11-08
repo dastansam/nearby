@@ -1,0 +1,13 @@
+{
+  "seed_hex": "0202020202020202020202020202020202020202020202020202020202020202",
+  "public_key": "ed25519:9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu",
+  "receipt": {
+    "voucher": "ed25519:3s1dc5kqf4Fd6DgPVqk2YF3Yq3nYxE3sgVAnpFm9WQpsiwF5nNRnnAgsRm4qodGj5p1e8inqeeNsvbG7pTHF5x9s",
+    "tx": "GvjYLvZhMfS4ukWWd3Fn1Kkbzcg7EmWQfovmDqxRUWYa",
+    "block": 223318490
+  },
+  "signed": {
+    "payload": "{\"voucher\":\"ed25519:3s1dc5kqf4Fd6DgPVqk2YF3Yq3nYxE3sgVAnpFm9WQpsiwF5nNRnnAgsRm4qodGj5p1e8inqeeNsvbG7pTHF5x9s\",\"tx\":\"GvjYLvZhMfS4ukWWd3Fn1Kkbzcg7EmWQfovmDqxRUWYa\",\"block\":223318490}",
+    "signature": "ed25519:5UkxuMKKKa92RGezazVCRr6YE271oZVnBqh5mtCVPQfk3YEYBLoydUPD9GhD6UpEXextsSP2YUrNwTAhDKwLUnqf"
+  }
+}

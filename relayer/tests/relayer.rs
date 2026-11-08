@@ -4,7 +4,7 @@ use axum::http::{Request, StatusCode};
 use chrono::{DateTime, Duration, Utc};
 use ed25519_dalek::{Signature, SigningKey, Verifier};
 use http_body_util::BodyExt;
-use nearby_relayer::attestation::ATTESTATION_DOMAIN;
+use nearby_relayer::attestation::{ATTESTATION_DOMAIN, RECEIPT_DOMAIN};
 use nearby_relayer::chain::{At, Chain, ChainError};
 use nearby_relayer::server::router;
 use nearby_relayer::settle::{Outcome, Settler};
@@ -29,10 +29,14 @@ struct Fake {
     lagging: bool,                // the node answering views has not seen what was just executed
     lookups: usize,               // calls made
     executed: Vec<SignedVoucher>,
-    block: u64, // the height every view is answered at
+    block: u64,         // the height every view is answered at
+    bond: &'static str, // yoctoNEAR the bond contract reports at stake for every account
+    refuse_slash: Option<&'static str>,
+    no_answer_to_slashing: bool, // the slashing goes through, and the answer never comes back
+    slashed: Vec<(SignedVoucher, SignedVoucher)>,
 }
 
-/// A stand-in for intents.near.
+/// A stand-in for intents.near and the bond contract.
 struct FakeChain(Mutex<Fake>);
 
 impl FakeChain {
@@ -47,6 +51,10 @@ impl FakeChain {
             lookups: 0,
             executed: Vec::new(),
             block: BLOCK,
+            bond: "5000000000000000000000000",
+            refuse_slash: None,
+            no_answer_to_slashing: false,
+            slashed: Vec::new(),
         };
         Arc::new(Self(Mutex::new(fake)))
     }
@@ -104,6 +112,29 @@ impl Chain for FakeChain {
         fake.down = fake.fails_after_executing;
         Ok(format!("tx{}", fake.executed.len()))
     }
+
+    async fn bond_of(&self, _account: &str) -> Result<String, ChainError> {
+        Ok(self.reach().await?.bond.into())
+    }
+
+    async fn slash(&self, signer: &str, a: &SignedVoucher, b: &SignedVoucher) -> Result<String, ChainError> {
+        let mut fake = self.reach().await?;
+        let banned = fake.slashed.iter().any(|(first, _)| account_of(first) == signer);
+        if banned {
+            return Err(ChainError::Refused("already slashed".into()));
+        }
+        if fake.bond == "0" {
+            return Err(ChainError::Refused("nothing at stake".into()));
+        }
+        if let Some(why) = fake.refuse_slash {
+            return Err(ChainError::Refused(why.into()));
+        }
+        fake.slashed.push((a.clone(), b.clone()));
+        if fake.no_answer_to_slashing {
+            return Err(ChainError::Unknown("timed out".into()));
+        }
+        Ok(format!("slash{}", fake.slashed.len()))
+    }
 }
 
 /// A payment to sign. The defaults are an ordinary NearBy payment from `payer()`.
@@ -122,6 +153,12 @@ fn payer() -> SigningKey {
 
 fn account(key: &SigningKey) -> String {
     implicit_account(key.verifying_key().as_bytes())
+}
+
+fn account_of(v: &SignedVoucher) -> String {
+    serde_json::from_str::<IntentMessage>(&v.payload.message)
+        .unwrap()
+        .signer_id
 }
 
 impl Default for Pay {
@@ -156,10 +193,35 @@ fn pay() -> SignedVoucher {
     Pay::default().sign()
 }
 
+/// Two payments by `payer()` to two merchants with one sequence number: a double-spend.
+fn pair() -> (SignedVoucher, SignedVoucher) {
+    let numbered = |to| {
+        Pay {
+            to,
+            memo: Some("seq:4 prev:00"),
+            ..Pay::default()
+        }
+        .sign()
+    };
+    (numbered("merchant.near"), numbered("other.near"))
+}
+
 /// Uploads vouchers as a phone sends them: as JSON.
 async fn settle(settler: &Settler<FakeChain>, vouchers: &[&SignedVoucher]) -> Vec<Outcome> {
     let uploaded: Vec<Value> = vouchers.iter().map(|v| json!(v)).collect();
     settler.settle(&uploaded).await
+}
+
+/// The pairs recorded so far, without what the bond contract made of them.
+async fn pairs(settler: &Settler<FakeChain>) -> Vec<(SignedVoucher, SignedVoucher)> {
+    settler.equivocations().await.into_iter().map(|p| (p.a, p.b)).collect()
+}
+
+/// Lets the settler's background tasks (slashing) run to completion.
+async fn settle_down() {
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
 }
 
 fn settled(tx: Option<&str>, block: Option<u64>) -> Outcome {
@@ -454,12 +516,100 @@ async fn two_vouchers_with_the_same_sequence_number_are_kept_as_proof_and_both_s
     )
     .await;
     settle(&settler, &[&second, &second, &first]).await;
-    assert_eq!(settler.equivocations().await, [(first, second)]);
+    assert_eq!(pairs(&settler).await, [(first, second)]);
     assert_eq!(
         chain.state().executed.len(),
         3,
         "the chain decides which of the pair the balance covers"
     );
+}
+
+// Layer 3 of the double-spend model: the proof costs the cheat their bond, without anyone having to
+// collect pairs from the relayer and submit them by hand.
+#[tokio::test]
+async fn a_pair_goes_to_the_bond_contract_and_the_slashing_transaction_is_published() {
+    let chain = FakeChain::new();
+    let settler = Settler::new(chain.clone());
+    let (first, second) = pair();
+    settle(&settler, &[&first, &second]).await;
+    settle_down().await;
+    assert_eq!(chain.state().slashed, [(first, second)]);
+    assert_eq!(settler.equivocations().await[0].tx.as_deref(), Some("slash1"));
+}
+
+// The relayer could not reach the chain; nothing is known. The pair must not be lost, and the
+// next gateway to carry the voucher gives it another go.
+#[tokio::test]
+async fn a_slashing_lost_to_an_outage_is_sent_again_with_the_next_upload() {
+    let chain = FakeChain::new();
+    let settler = Settler::new(chain.clone());
+    let (first, second) = pair();
+    settle(&settler, &[&first]).await;
+    chain.state().down = true;
+    settle(&settler, &[&second]).await;
+    settle_down().await;
+    let proof = &settler.equivocations().await[0];
+    assert_eq!((proof.tx.as_deref(), proof.refusal.as_deref()), (None, None));
+    chain.state().down = false;
+    settle(&settler, &[&second]).await;
+    settle_down().await;
+    assert_eq!(settler.equivocations().await[0].tx.as_deref(), Some("slash1"));
+    assert_eq!(chain.state().slashed.len(), 1);
+}
+
+// The relayer believed the pair was proof and the contract did not: a bug in one of them, or an
+// attack on the check. Either way the operator must see it, not lose it.
+#[tokio::test]
+async fn a_pair_the_bond_contract_turns_down_is_kept_with_its_reason() {
+    let chain = FakeChain::new();
+    chain.state().refuse_slash = Some("different sequence numbers");
+    let settler = Settler::new(chain.clone());
+    let (first, second) = pair();
+    settle(&settler, &[&first, &second]).await;
+    settle_down().await;
+    let proof = &settler.equivocations().await[0];
+    assert_eq!(
+        (proof.tx.as_deref(), proof.refusal.as_deref()),
+        (None, Some("different sequence numbers"))
+    );
+}
+
+// The slashing landed but its answer was lost. Sending it again would burn gas on a transaction the
+// contract must refuse, and record that refusal as if the key had never been slashed.
+#[tokio::test]
+async fn a_slashing_whose_answer_was_lost_is_recognised_rather_than_sent_again() {
+    let chain = FakeChain::new();
+    chain.state().no_answer_to_slashing = true;
+    let settler = Settler::new(chain.clone());
+    let (first, second) = pair();
+    settle(&settler, &[&first, &second]).await;
+    settle_down().await;
+    chain.state().no_answer_to_slashing = false;
+    settle(&settler, &[&second]).await;
+    settle_down().await;
+    let proof = &settler.equivocations().await[0];
+    assert_eq!(
+        (proof.tx.as_deref(), proof.refusal.as_deref()),
+        (None, Some("already slashed"))
+    );
+    assert_eq!(chain.state().slashed.len(), 1, "one transaction, not two");
+}
+
+// Pairs are free to make with a throwaway key; a transaction for each would cost the relayer gas.
+#[tokio::test]
+async fn a_pair_from_a_key_with_nothing_at_stake_is_kept_but_not_sent() {
+    let chain = FakeChain::new();
+    chain.state().bond = "0";
+    let settler = Settler::new(chain.clone());
+    let (first, second) = pair();
+    settle(&settler, &[&first, &second]).await;
+    settle_down().await;
+    let proof = &settler.equivocations().await[0];
+    assert_eq!(
+        (proof.tx.as_deref(), proof.refusal.as_deref()),
+        (None, Some("nothing at stake"))
+    );
+    assert!(chain.state().slashed.is_empty());
 }
 
 #[tokio::test]
@@ -481,7 +631,7 @@ async fn an_expired_voucher_is_not_settled_but_still_counts_as_half_of_a_proof()
     }
     .sign();
     assert_eq!(settle(&settler, &[&first, &late]).await[1], invalid("expired"));
-    assert_eq!(settler.equivocations().await, [(first.clone(), late)]);
+    assert_eq!(pairs(&settler).await, [(first.clone(), late)]);
     assert_eq!(chain.state().executed, [first]);
 }
 
@@ -515,7 +665,7 @@ async fn a_pair_that_reuses_the_nonce_as_well_as_the_sequence_number_is_still_pr
     }
     .sign();
     settle(&settler, &[&first, &second]).await;
-    assert_eq!(settler.equivocations().await, [(first, second)]);
+    assert_eq!(pairs(&settler).await, [(first, second)]);
 }
 
 #[tokio::test]
@@ -546,7 +696,7 @@ async fn someone_elses_pair_cannot_make_a_real_proof_look_already_recorded() {
     }
     .sign();
     settle(&settler, &[&first, &second]).await;
-    assert_eq!(settler.equivocations().await[1], (first, second));
+    assert_eq!(pairs(&settler).await[1], (first, second));
 }
 
 #[tokio::test]
@@ -561,7 +711,7 @@ async fn the_same_voucher_respelled_is_not_a_second_voucher() {
     let mut respelled = v.clone();
     respelled.signature = v.signature.replace("ed25519:", "");
     assert_eq!(settle(&settler, &[&v, &respelled]).await[1], invalid("malformed"));
-    assert_eq!(settler.equivocations().await, []);
+    assert_eq!(pairs(&settler).await, []);
 }
 
 #[tokio::test]
@@ -585,13 +735,22 @@ async fn the_same_sequence_number_from_two_different_payers_is_not_a_double_spen
         ],
     )
     .await;
-    assert_eq!(settler.equivocations().await, []);
+    assert_eq!(pairs(&settler).await, []);
 }
 
 // ---- over HTTP
 
 fn attestation_key() -> SigningKey {
     SigningKey::from_bytes(&[8; 32])
+}
+
+/// Whether the relayer's attestation key signed `payload` under `domain`, with the signature in `signed`.
+fn relayer_signed(domain: &str, signed: &Value, payload: &str) -> bool {
+    let signature = Signature::from_bytes(&untag(signed["signature"].as_str().unwrap()).unwrap());
+    attestation_key()
+        .verifying_key()
+        .verify(format!("{domain}{payload}").as_bytes(), &signature)
+        .is_ok()
 }
 
 fn now() -> DateTime<Utc> {
@@ -619,13 +778,42 @@ async fn request(chain: &Arc<FakeChain>, method: &str, path: &str, body: Option<
 #[tokio::test]
 async fn a_gateway_uploads_its_outbox_over_http_and_gets_one_result_per_voucher() {
     let chain = FakeChain::new();
-    let (status, body) = request(&chain, "POST", "/vouchers", Some(json!({ "vouchers": [pay(), {}] }))).await;
+    let v = pay();
+    let (status, body) = request(&chain, "POST", "/vouchers", Some(json!({ "vouchers": [v, {}] }))).await;
     assert_eq!(status, StatusCode::OK);
-    // The exact JSON the app reads: app/lib/gateway.dart looks for "status", "tx" and "block".
+    // The exact JSON the app reads: app/lib/gateway.dart looks for "status", "tx", "block" and "receipt".
     assert_eq!(
-        body,
-        json!({ "results": [{ "status": "settled", "tx": "tx1", "block": BLOCK }, { "status": "invalid", "reason": "malformed" }] })
+        body["results"][1],
+        json!({ "status": "invalid", "reason": "malformed" })
     );
+    let settled = &body["results"][0];
+    assert_eq!(
+        (&settled["status"], &settled["tx"], &settled["block"]),
+        (&json!("settled"), &json!("tx1"), &json!(BLOCK))
+    );
+    // The receipt is for the phones still offline: the relayer's signature over the voucher's
+    // identity and the block, which they check against the pinned key.
+    let payload = settled["receipt"]["payload"].as_str().unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(payload).unwrap(),
+        json!({ "voucher": v.signature, "tx": "tx1", "block": BLOCK })
+    );
+    assert!(relayer_signed(RECEIPT_DOMAIN, &settled["receipt"], payload));
+}
+
+// A payer can sign two vouchers on one nonce for two merchants. The chain shows the nonce spent
+// either way; only the relayer that sent the transaction knows which voucher got paid. A signed
+// "settled" for the other would spread to every phone and tell the unpaid merchant they were paid.
+#[tokio::test]
+async fn no_receipt_is_signed_for_a_voucher_the_relayer_did_not_settle_itself() {
+    let chain = FakeChain::new();
+    let v = pay();
+    chain
+        .state()
+        .used
+        .insert(format!("{}:{}", account_of(&v), v.payload.nonce));
+    let (_, body) = request(&chain, "POST", "/vouchers", Some(json!({ "vouchers": [v] }))).await;
+    assert_eq!(body["results"][0], json!({ "status": "settled", "block": BLOCK }));
 }
 
 // Phones upload when they briefly have a signal, and often lose it before the answer. The gas is
@@ -679,22 +867,24 @@ async fn an_attestation_is_the_chain_balance_signed_by_the_relayers_published_ke
     let payload = signed["payload"].as_str().unwrap();
     assert_eq!(
         serde_json::from_str::<Value>(payload).unwrap(),
-        json!({ "account": signer, "token": USDC_TOKEN, "balance": "25000000", "bond": "0", "as_of": AT, "block": BLOCK })
+        json!({ "account": signer, "token": USDC_TOKEN, "balance": "25000000", "bond": "5000000000000000000000000", "as_of": AT, "block": BLOCK })
     );
+    // A payee reads the bond off the attestation: with none, there is nothing to lose by cheating.
+    chain.state().bond = "0";
+    let (_, unbonded) = request(&chain, "GET", &format!("/attestation/{signer}"), None).await;
+    let unbonded: Value = serde_json::from_str(unbonded["payload"].as_str().unwrap()).unwrap();
+    assert_eq!(unbonded["bond"], "0");
     let (_, about) = request(&chain, "GET", "/", None).await;
     assert_eq!(
         about["attestation_key"],
         tag(attestation_key().verifying_key().as_bytes())
     );
-    let signature = Signature::from_bytes(&untag(signed["signature"].as_str().unwrap()).unwrap());
-    let verifies = |payload: &str| {
-        attestation_key()
-            .verifying_key()
-            .verify(format!("{ATTESTATION_DOMAIN}{payload}").as_bytes(), &signature)
-            .is_ok()
-    };
-    assert!(verifies(payload));
-    assert!(!verifies(&payload.replace("25000000", "95000000")));
+    assert!(relayer_signed(ATTESTATION_DOMAIN, &signed, payload));
+    assert!(!relayer_signed(
+        ATTESTATION_DOMAIN,
+        &signed,
+        &payload.replace("25000000", "95000000")
+    ));
 }
 
 #[tokio::test]
@@ -715,29 +905,20 @@ async fn no_attestation_for_something_that_is_not_an_offline_account_or_when_the
 
 #[tokio::test]
 async fn proofs_of_double_spending_are_published_as_pairs_of_vouchers() {
-    // Whoever submits them to the bond contract needs both vouchers exactly as signed.
+    // Both vouchers exactly as signed, so anyone can check the proof, and the slashing transaction.
     let chain = FakeChain::new();
-    let first = Pay {
-        memo: Some("seq:4 prev:00"),
-        ..Pay::default()
-    }
-    .sign();
-    let second = Pay {
-        to: "other.near",
-        memo: Some("seq:4 prev:00"),
-        ..Pay::default()
-    }
-    .sign();
+    let (first, second) = pair();
     let app = router(chain.clone(), attestation_key(), now);
     let upload = Request::post("/vouchers")
         .header("content-type", "application/json")
         .body(Body::from(json!({ "vouchers": [first, second] }).to_string()))
         .unwrap();
     app.clone().oneshot(upload).await.unwrap();
+    settle_down().await;
     let response = app
         .oneshot(Request::get("/equivocations").body(Body::empty()).unwrap())
         .await
         .unwrap();
     let published: Value = serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(published, json!([[first, second]]));
+    assert_eq!(published, json!([{ "a": first, "b": second, "tx": "slash1" }]));
 }

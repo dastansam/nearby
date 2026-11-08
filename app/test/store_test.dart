@@ -134,11 +134,37 @@ void main() {
     await store.put(voucher, VoucherKind.received);
     await store.setOutcome(voucher, Outcome.settled, tx: 'tx1');
     expect((await store.from(signerOf(voucher))).single.settledBlock, isNull);
-    await store.setOutcome(voucher, Outcome.settled, block: 5000);
-    await store.setOutcome(voucher, Outcome.settled, block: 9000);
+    await store.setOutcome(voucher, Outcome.settled, block: 5000, receipt: {'payload': 'p', 'signature': 's'});
+    await store.setOutcome(voucher, Outcome.settled, block: 9000, receipt: {'payload': 'q', 'signature': 't'});
     await store.setOutcome(voucher, Outcome.failed, tx: 'other', block: 1);
     final kept = (await store.from(signerOf(voucher))).single;
     expect((kept.outcome, kept.tx, kept.settledBlock), (Outcome.settled, 'tx1', 5000));
+    expect(jsonDecode((await store.held())[voucherKey(voucher)]!), {'payload': 'p', 'signature': 's'},
+        reason: 'the receipt is passed on to phones still carrying the voucher');
+  });
+
+  test('a claimed voucher is announced as it stands, answer and all', () async {
+    // The gateway uploads a carried voucher at once, so the chain can answer before the payee claims it.
+    await store.put(voucher, VoucherKind.relayed, hops: 1);
+    await store.setOutcome(voucher, Outcome.settled, tx: 'tx1', block: 7);
+    final heard = <StoredVoucher>[];
+    final sub = store.puts.listen(heard.add);
+    addTearDown(sub.cancel);
+    await store.put(voucher, VoucherKind.received);
+    expect((heard.single.kind, heard.single.outcome, heard.single.tx), (VoucherKind.received, Outcome.settled, 'tx1'));
+  });
+
+  test('tells listeners how a voucher stands once the relayer has answered', () async {
+    // The receive screen shows "pending" with the customer still there; this is how it learns better.
+    // What is told is the row as it stands, so a late "failed" cannot show over a settlement.
+    await store.put(voucher, VoucherKind.received);
+    final heard = <(Outcome?, String?)>[];
+    final sub = store.outcomes.listen((s) => heard.add((s.outcome, s.tx)));
+    addTearDown(sub.cancel);
+    await store.setOutcome(voucher, Outcome.settled, tx: 'tx1');
+    await store.setOutcome(voucher, Outcome.failed);
+    await store.setOutcome(await sign('other.near', makeNonce()), Outcome.failed); // not stored: nothing to tell
+    expect(heard, [(Outcome.settled, 'tx1'), (Outcome.settled, 'tx1')]);
   });
 
   test('finds every voucher of one payer and nobody else\'s', () async {

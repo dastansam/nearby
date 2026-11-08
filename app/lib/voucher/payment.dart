@@ -9,7 +9,7 @@ import 'nep413.dart';
 /// USDC on NEAR, as held inside intents.near. 6 decimals.
 const usdcToken = 'nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1';
 const _usdcDecimals = 6;
-const _voucherLifetime = Duration(hours: 72);
+const voucherLifetime = Duration(hours: 72);
 
 /// Memo characters every JSON encoder writes the same way, so the rebuilt message can match.
 final _plainAscii = RegExp(r'^[\x20-\x7e]*$');
@@ -78,7 +78,7 @@ Future<Map<String, dynamic>> signPayment(SimpleKeyPair key, PaymentRequest reque
     signVoucher(
     key,
     [Transfer(request.receiverId, {request.token: request.amount}, memo: '${request.memoTag} seq:$seq prev:$prev')],
-    DateTime.now().add(_voucherLifetime),
+    DateTime.now().add(voucherLifetime),
     makeNonce());
 
 /// The payee's offline checks on a scanned voucher. Returns the voucher if it is a valid
