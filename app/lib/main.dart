@@ -1,11 +1,14 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'gateway.dart';
 import 'mesh/gossip.dart';
+import 'mesh/multipeer_transport.dart';
 import 'mesh/nearby_transport.dart';
+import 'mesh/transport.dart';
 import 'screens/pay.dart';
 import 'screens/receive.dart';
 import 'store.dart';
@@ -92,7 +95,9 @@ class _HomeScreenState extends State<HomeScreen> {
     if (relayerUrl.isNotEmpty) {
       _gateway = Gateway(_store, relayerUrl, account: wallet.accountId, onChange: _reloadVouchers)..start();
     }
-    final gossip = Gossip(NearbyTransport(), _store, onChange: () {
+    // Each platform's own offline radio; the two do not speak to each other.
+    final Transport radio = Platform.isIOS ? MultipeerTransport() : NearbyTransport();
+    final gossip = Gossip(radio, _store, onChange: () {
       if (mounted) setState(() {});
     });
     try {

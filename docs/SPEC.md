@@ -10,6 +10,8 @@ Local copy of the living spec at https://claude.ai/artifact/WL5vbTkHi7PiMb4KZXe9
 
 **This file is newer on the relayer's language (2026-11-06).** The relayer is written in Rust (axum, plain JSON-RPC to NEAR), not TypeScript. Its HTTP API and signed formats are unchanged.
 
+**This file is newer on iOS (2026-11-07).** The app also builds for iPhone, with Apple's Multipeer Connectivity as the radio behind the same `Transport` interface (`app/ios/Runner/Multipeer.swift`). The demo can run on three iPhones instead of three Android phones. iPhones relay only to iPhones and Android phones only to Android phones; the QR path works across the two. The stack table still lists iOS as roadmap.
+
 We ship a Flutter app that pays with no internet. The payer signs a NEAR transfer on the phone, nearby phones relay it hop by hop over Bluetooth, and the first phone with a signal settles it on NEAR. Deadline: Nov 14, 23:59 UTC, 9 days from today.
 
 ## Overview
