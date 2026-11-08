@@ -1,6 +1,6 @@
 # NearBy
 
-Offline payments relayed phone-to-phone over Bluetooth and Wi-Fi ([Nearby Connections](https://developers.google.com/nearby/connections/overview)) and settled on NEAR through [NEAR Intents](https://docs.near-intents.org).
+Offline payments relayed phone-to-phone over Bluetooth and Wi-Fi ([Nearby Connections](https://developers.google.com/nearby/connections/overview) on Android, [Multipeer Connectivity](https://developer.apple.com/documentation/multipeerconnectivity) on iOS) and settled on NEAR through [NEAR Intents](https://docs.near-intents.org).
 
 > Pay anyone nearby, even with no signal. Settled on NEAR.
 
@@ -47,7 +47,9 @@ flutter build apk --debug \
   --dart-define=RELAYER_KEY=ed25519:<attestation key from GET />
 ```
 
-Debug builds may use plain `http`; release builds need `https`. Without `RELAYER_URL` the app still pays, receives and relays, but never uploads. Without `RELAYER_KEY` there is no relayer whose balance attestations the app trusts, so payees skip the balance check (the receive screen says so) and enforce only the 25 USDC limit and the sequence numbers.
+For iPhones, with Xcode signed into the developer account: `flutter run -d <iphone>` with the same `--dart-define`s, or `flutter build ipa` for TestFlight. The project carries our signing team; another team changes it in Xcode under Signing & Capabilities.
+
+Debug builds may use plain `http`; release and TestFlight builds need `https`. Without `RELAYER_URL` the app still pays, receives and relays, but never uploads. Without `RELAYER_KEY` there is no relayer whose balance attestations the app trusts, so payees skip the balance check (the receive screen says so) and enforce only the 25 USDC limit and the sequence numbers.
 
 Tests: `cargo test` at the root (relayer and voucher), `cargo test -p nearby-bond`, `flutter test` in `app/`.
 
@@ -55,7 +57,8 @@ Tests: `cargo test` at the root (relayer and voucher), `cargo test -p nearby-bon
 
 | Path | What |
 | --- | --- |
-| `app/` | Flutter app (Android): offline wallet, voucher signing/verification, QR pay and receive, phone-to-phone relay, upload to the relayer |
+| `app/` | Flutter app (Android and iOS): offline wallet, voucher signing/verification, QR pay and receive, phone-to-phone relay, upload to the relayer |
+| `app/ios/Runner/Multipeer.swift` | The iOS radio: Multipeer Connectivity behind the same `Transport` interface as Android's Nearby Connections |
 | `relayer/` | Rust service: receives vouchers, calls `execute_intents`, signs balance attestations, keeps pairs of vouchers that prove a double-spend |
 | `relayer/src/bin/settle-test.rs` | Gate 1: sign a voucher now, submit it later, see whether it settles (`cargo run --bin settle-test -- sign`, then `submit`) |
 | `bond/` | NEAR contract (Rust, near-sdk): bonds in NEAR, `slash` with two equivocating vouchers, key bans |
@@ -68,6 +71,8 @@ Tests: `cargo test` at the root (relayer and voucher), `cargo test -p nearby-bon
 Hackathon build for NEAR Hackathon (submissions close 2026-11-14 23:59 UTC). Mainnet only: Intents has no testnet deployment.
 
 Not yet proven: no voucher has settled with a funded account (only dry runs against mainnet), and the phone-to-phone relay has only run in tests, not on phones.
+
+The relay is per platform: iPhones find iPhones, Android phones find Android phones, and the two never find each other. Everything else, including the QR path, works across the two.
 
 Double-spending offline is bounded, provable and punished, not prevented. A merchant with a signal need not take the risk: the payment is uploaded the moment it is accepted and the receive screen shows the chain's answer within seconds, settled, refused for good, or turned down for now with the reason (the payer's balance is short). A payer can still overspend across merchants who are offline and have not seen each other's vouchers, up to 25 USDC each, for as long as their attestation lasts. Two vouchers with one sequence number prove it; the relayer hands the pair to the bond contract, and the key forfeits its bond (5 NEAR or more) and is banned. The forfeited bond stays in the contract: paying it to the vouchers' receivers would let a cheat name their own accounts and slash themselves, and compensating the merchant left unpaid needs settlement evidence the contract does not have. The contract has 15 unit tests and has not been deployed or slashed on mainnet yet; the bond is in NEAR while the budget is in USDC, so the two are not compared, and a payer cheating many merchants in one afternoon can still take more than the bond.
 
