@@ -110,9 +110,10 @@ class Gateway {
         }
         // A settled result may carry the relayer's signed receipt, for phones with no signal that
         // still carry the voucher. They check it against the key this build pins, so one that fails
-        // here would only be refused by every peer: record the answer without it, and say so.
+        // here would only be refused by every peer: record the answer without it, and say so (not
+        // in a build that pins no key: it cannot carry receipts, and that is no misconfiguration).
         final receipt = result['receipt'];
-        if (receipt != null) {
+        if (receipt != null && relayerKey.isNotEmpty) {
           if (await keepReceipt(_store, batch[j], receipt)) continue;
           debugPrint('gateway: the relayer\'s receipt is not signed by the key this build trusts');
         }

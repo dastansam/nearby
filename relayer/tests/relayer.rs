@@ -33,6 +33,7 @@ struct Fake {
     bond: &'static str, // yoctoNEAR the bond contract reports at stake for every account
     refuse_slash: Option<&'static str>,
     no_answer_to_slashing: bool, // the slashing goes through, and the answer never comes back
+    slashing_hangs: bool,        // the slashing call never returns
     slashed: Vec<(SignedVoucher, SignedVoucher)>,
 }
 
@@ -54,6 +55,7 @@ impl FakeChain {
             bond: "5000000000000000000000000",
             refuse_slash: None,
             no_answer_to_slashing: false,
+            slashing_hangs: false,
             slashed: Vec::new(),
         };
         Arc::new(Self(Mutex::new(fake)))
@@ -118,6 +120,9 @@ impl Chain for FakeChain {
     }
 
     async fn slash(&self, signer: &str, a: &SignedVoucher, b: &SignedVoucher) -> Result<String, ChainError> {
+        if self.reach().await?.slashing_hangs {
+            return std::future::pending().await;
+        }
         let mut fake = self.reach().await?;
         let banned = fake.slashed.iter().any(|(first, _)| account_of(first) == signer);
         if banned {
@@ -572,6 +577,51 @@ async fn a_pair_the_bond_contract_turns_down_is_kept_with_its_reason() {
         (proof.tx.as_deref(), proof.refusal.as_deref()),
         (None, Some("different sequence numbers"))
     );
+}
+
+// A refusal is the contract's answer about that transaction, not for ever: a slashing can run out of
+// gas, and a key with nothing at stake today can bond tomorrow. A pair that was refused rests, then
+// goes again; a refusal is never the last word on a cheat.
+#[tokio::test(start_paused = true)]
+async fn a_refused_pair_is_sent_again_after_a_rest() {
+    let chain = FakeChain::new();
+    chain.state().refuse_slash = Some("exceeded the prepaid gas");
+    let settler = Settler::new(chain.clone());
+    let (first, second) = pair();
+    settle(&settler, &[&first, &second]).await;
+    settle_down().await;
+    chain.state().refuse_slash = None;
+    settle(&settler, &[&second]).await;
+    settle_down().await;
+    assert!(
+        chain.state().slashed.is_empty(),
+        "not straight away: every phone re-uploads it"
+    );
+    tokio::time::advance(std::time::Duration::from_secs(60 * 60)).await;
+    settle(&settler, &[&second]).await;
+    settle_down().await;
+    let proof = &settler.equivocations().await[0];
+    assert_eq!((proof.tx.as_deref(), proof.refusal.as_deref()), (Some("slash1"), None));
+}
+
+// The task carrying a slashing can die without reporting back (a panic, a shutdown mid-flight).
+// The pair must not stay "on its way" for ever.
+#[tokio::test(start_paused = true)]
+async fn a_slashing_that_never_reports_back_is_sent_again_after_the_in_flight_time() {
+    let chain = FakeChain::new();
+    chain.state().slashing_hangs = true;
+    let settler = Settler::new(chain.clone());
+    let (first, second) = pair();
+    settle(&settler, &[&first, &second]).await;
+    settle_down().await;
+    chain.state().slashing_hangs = false;
+    settle(&settler, &[&second]).await;
+    settle_down().await;
+    assert!(chain.state().slashed.is_empty(), "the first may still land");
+    tokio::time::advance(std::time::Duration::from_secs(120)).await;
+    settle(&settler, &[&second]).await;
+    settle_down().await;
+    assert_eq!(settler.equivocations().await[0].tx.as_deref(), Some("slash1"));
 }
 
 // The slashing landed but its answer was lost. Sending it again would burn gas on a transaction the

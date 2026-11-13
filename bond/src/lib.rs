@@ -11,8 +11,9 @@
 //! themselves, getting the bond back at once and shutting the real merchants out with a ban.
 //! Compensating the merchant who was left unpaid needs settlement evidence this contract does not
 //! have, and is roadmap.
+use near_sdk::json_types::U64;
 use near_sdk::store::LookupMap;
-use near_sdk::{env, near, require, AccountId, NearToken, Promise};
+use near_sdk::{env, near, require, AccountId, Gas, NearToken, Promise, PromiseError};
 use voucher::{parse_voucher, transfer, Parsed, SignedVoucher, Transfer};
 
 /// How long a withdrawal waits after `unbond`. A payee takes a voucher valid for up to 73 h on
@@ -57,7 +58,9 @@ impl Default for Bonds {
 #[near]
 impl Bonds {
     /// Lock the attached NEAR as `account`'s bond. Anyone may pay it: the offline account itself
-    /// holds only tokens inside intents.near. Later payments add to the bond and change nothing else.
+    /// holds only tokens inside intents.near. Whoever paid first owns it, and only they may add to
+    /// it: the whole bond leaves with its owner, so anyone else's deposit would be theirs to take.
+    /// Adding changes nothing else.
     #[payable]
     pub fn bond_for(&mut self, account: AccountId) {
         let deposit = env::attached_deposit();
@@ -68,11 +71,14 @@ impl Bonds {
                 amount,
                 owner,
                 unbonding_since,
-            }) => Lock::Bonded {
-                amount: amount.saturating_add(deposit),
-                owner: owner.clone(),
-                unbonding_since: *unbonding_since,
-            },
+            }) => {
+                require!(*owner == env::predecessor_account_id(), "not your bond");
+                Lock::Bonded {
+                    amount: amount.saturating_add(deposit),
+                    owner: owner.clone(),
+                    unbonding_since: *unbonding_since,
+                }
+            }
             None => Lock::Bonded {
                 amount: deposit,
                 owner: env::predecessor_account_id(),
@@ -93,7 +99,8 @@ impl Bonds {
         }
     }
 
-    /// Returns `account`'s bond to its owner once the unbonding delay has passed.
+    /// Returns `account`'s bond to its owner once the unbonding delay has passed. The lock is
+    /// removed first, so the bond cannot be withdrawn twice, and put back if the transfer fails.
     pub fn withdraw(&mut self, account: AccountId) -> Promise {
         let Some(Lock::Bonded {
             amount,
@@ -108,9 +115,37 @@ impl Bonds {
             env::block_timestamp() >= since.saturating_add(UNBONDING_NS),
             "still unbonding"
         );
-        let (amount, owner) = (*amount, owner.clone());
+        let (amount, owner, since) = (*amount, owner.clone(), *since);
         self.locks.remove(&account);
-        Promise::new(owner).transfer(amount)
+        Promise::new(owner.clone()).transfer(amount).then(
+            Self::ext(env::current_account_id())
+                .with_static_gas(Gas::from_tgas(5))
+                .withdrawn(account, amount, owner, U64(since)),
+        )
+    }
+
+    /// After `withdraw`'s transfer. If it failed (the owner's account is gone, say), the bond is
+    /// put back as it was, still unbonding, rather than left here with no record of who it is owed
+    /// to; `withdraw` can be called again.
+    #[private]
+    pub fn withdrawn(
+        &mut self,
+        account: AccountId,
+        amount: NearToken,
+        owner: AccountId,
+        since: U64,
+        #[callback_result] transfer: Result<(), PromiseError>,
+    ) {
+        if transfer.is_err() {
+            self.locks.insert(
+                account,
+                Lock::Bonded {
+                    amount,
+                    owner,
+                    unbonding_since: Some(since.0),
+                },
+            );
+        }
     }
 
     /// What backs `account`'s payments right now: nothing while unbonding or once banned.
@@ -350,6 +385,40 @@ mod tests {
         assert!(c.at_stake(account(&k)).is_zero());
     }
 
+    // The transfer can fail: the owner's account may be gone by then. Without this the NEAR would
+    // sit in the contract with no record that anyone is owed it.
+    #[test]
+    fn a_withdrawal_whose_transfer_failed_is_put_back_to_try_again() {
+        let (k, mut c) = unbonding(NEAR);
+        let (me, wallet): (AccountId, AccountId) = (account(&k), "wallet.near".parse().unwrap());
+        call("wallet.near", 0, 1_000 + UNBONDING_NS);
+        let _ = c.withdraw(me.clone());
+        assert!(
+            c.at_stake(me.clone()).is_zero(),
+            "nothing to slash or withdraw twice meanwhile"
+        );
+        testing_env!(VMContextBuilder::new()
+            .current_account_id("bond.near".parse().unwrap())
+            .predecessor_account_id("bond.near".parse().unwrap())
+            .build());
+        c.withdrawn(
+            me.clone(),
+            NearToken::from_yoctonear(NEAR),
+            wallet.clone(),
+            U64(1_000),
+            Err(PromiseError::Failed),
+        );
+        assert_eq!(c.at_stake(me.clone()).as_yoctonear(), NEAR);
+        assert!(
+            c.bond_of(me.clone()).is_zero(),
+            "still unbonding, not backing payments again"
+        );
+        call("wallet.near", 0, 1_000 + UNBONDING_NS);
+        let _ = c.withdraw(me.clone());
+        c.withdrawn(me.clone(), NearToken::from_yoctonear(NEAR), wallet, U64(1_000), Ok(()));
+        assert!(c.at_stake(me).is_zero());
+    }
+
     #[test]
     #[should_panic(expected = "unbond first")]
     fn a_bond_cannot_be_withdrawn_without_notice() {
@@ -368,12 +437,22 @@ mod tests {
         c.unbond(account(&k));
     }
 
-    // Anyone may add to a bond, so adding must not undo what the owner asked for: a yocto from a
-    // stranger would otherwise keep a bond locked for ever.
+    // Implicit account ids are public (QR codes, attestations). Whoever bonds one first owns the
+    // bond and takes all of it out, so a stranger who bonded a payer's account for 1 NEAR would
+    // otherwise be handed the 5 NEAR the payer's wallet adds.
     #[test]
-    fn a_stranger_adding_to_a_bond_adds_up_and_changes_nothing_else() {
+    #[should_panic(expected = "not your bond")]
+    fn a_stranger_cannot_add_to_a_bond_that_leaves_with_its_owner() {
+        let (k, mut c) = bonded(NEAR);
+        call("stranger.near", 5 * NEAR, 0);
+        c.bond_for(account(&k));
+    }
+
+    // Adding must not undo what the owner asked for.
+    #[test]
+    fn adding_to_an_unbonding_bond_adds_up_and_changes_nothing_else() {
         let (k, mut c) = unbonding(NEAR);
-        call("stranger.near", 2 * NEAR, 2_000);
+        call("wallet.near", 2 * NEAR, 2_000);
         c.bond_for(account(&k));
         assert!(c.bond_of(account(&k)).is_zero(), "still unbonding");
         assert_eq!(c.at_stake(account(&k)).as_yoctonear(), 3 * NEAR);

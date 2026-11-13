@@ -154,6 +154,18 @@ void main() {
     expect((heard.single.kind, heard.single.outcome, heard.single.tx), (VoucherKind.received, Outcome.settled, 'tx1'));
   });
 
+  // The mesh offers a voucher the moment it hears of it, and the payee's own payment and one
+  // carried for a stranger can be stored on the same tick. Listeners are promised the order they
+  // were stored in.
+  test('listeners hear vouchers in the order they were stored, however the puts interleave', () async {
+    final heard = <String>[];
+    final sub = store.puts.listen((s) => heard.add(voucherKey(s.voucher)));
+    addTearDown(sub.cancel);
+    final carried = await sign('other.near', makeNonce());
+    await Future.wait([store.put(voucher, VoucherKind.received), store.put(carried, VoucherKind.relayed, hops: 1)]);
+    expect(heard, [voucherKey(voucher), voucherKey(carried)]);
+  });
+
   test('tells listeners how a voucher stands once the relayer has answered', () async {
     // The receive screen shows "pending" with the customer still there; this is how it learns better.
     // What is told is the row as it stands, so a late "failed" cannot show over a settlement.

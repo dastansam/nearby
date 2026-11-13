@@ -17,7 +17,7 @@ void main() {
   sqfliteFfiInit();
   databaseFactory = databaseFactoryFfi;
 
-  final now = DateTime.utc(2026, 11, 11, 12);
+  final now = DateTime.utc(2026, 11, 11, 12); // every voucher and check below is dated from this
   final readAt = now.subtract(const Duration(hours: 2)); // when the relayer read the payer's balance
   const readBlock = 5000; // and the block it read it at
   late SimpleKeyPair payer;
@@ -35,7 +35,7 @@ void main() {
 
   Future<Map<String, dynamic>> pay(String amount, {int seq = 1, String prev = '00', String to = 'merchant.near'}) =>
       signPayment(payer, PaymentRequest(receiverId: to, token: usdcToken, amount: amount, id: newRequestId()),
-          seq: seq, prev: prev);
+          seq: seq, prev: prev, now: now);
 
   StoredVoucher seen(Map<String, dynamic> v, {Outcome? outcome, int? settledBlock}) =>
       (kind: VoucherKind.relayed, hops: 1, voucher: v, outcome: outcome, tx: null, settledBlock: settledBlock);

@@ -8,7 +8,6 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -83,7 +82,10 @@ pub struct NearChain {
     bond_contract: String,
     /// The last access-key nonce this process used. The node answering a view can be a block
     /// behind the one that ran our previous transaction, and would hand the same nonce out again.
-    last_nonce: AtomicU64,
+    /// Held from choosing the next nonce until the transaction has run: two in flight at once (a
+    /// settlement and a slashing, say) would take consecutive nonces, and the chain rejects
+    /// whichever lands second.
+    last_nonce: tokio::sync::Mutex<u64>,
 }
 
 impl NearChain {
@@ -99,7 +101,7 @@ impl NearChain {
             account,
             key,
             bond_contract,
-            last_nonce: AtomicU64::new(0),
+            last_nonce: tokio::sync::Mutex::new(0),
         }
     }
 
@@ -180,12 +182,9 @@ impl NearChain {
         let seen = access["nonce"]
             .as_u64()
             .ok_or_else(|| unexpected("access key", &access))?;
-        let next = |last: u64| Some(last.max(seen) + 1);
-        let nonce = self
-            .last_nonce
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, next)
-            .map(|last| last.max(seen) + 1)
-            .expect("always Some");
+        let mut last_nonce = self.last_nonce.lock().await;
+        let nonce = (*last_nonce).max(seen) + 1;
+        *last_nonce = nonce;
         let block_hash: [u8; 32] = block["header"]["hash"]
             .as_str()
             .and_then(untag)

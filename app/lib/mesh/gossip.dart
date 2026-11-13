@@ -63,10 +63,7 @@ class Gossip {
         onChange?.call();
         // Everything still open, not just what is worth passing on: a voucher that expired or ran
         // out of hops here may have settled elsewhere, and only a peer with the receipt can say so.
-        await _sendIds([peer], 'have', [
-          for (final s in await _store.all())
-            if (s.outcome == null) gossipId(voucherKey(s.voucher))
-        ]);
+        await _sendIds([peer], 'have', [for (final key in await _store.unanswered()) gossipId(key)]);
       }),
       onDisconnected: (peer) => _enqueue(() async {
         _peers.remove(peer);
