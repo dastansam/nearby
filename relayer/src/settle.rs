@@ -116,12 +116,14 @@ impl Proof {
         }
     }
 
-    /// Whether the pair should go to the bond contract now: not slashed, not refused for good, and
-    /// not on its way.
+    /// Nothing more will be asked of the chain about it: slashed, or judged by the contract.
+    fn closed(&self) -> bool {
+        self.tx.is_some() || self.refusal.as_deref().is_some_and(|why| !retryable(why))
+    }
+
+    /// Whether the pair should go to the bond contract now: not closed, and not on its way.
     fn due(&self, now: Instant) -> bool {
-        self.tx.is_none()
-            && self.refusal.as_deref().is_none_or(retryable)
-            && self.retry_after.is_none_or(|after| after <= now)
+        !self.closed() && self.retry_after.is_none_or(|after| after <= now)
     }
 
     /// Marks the pair as on its way and returns it, if it is due.
@@ -171,8 +173,7 @@ impl<V> Remembered<V> {
 
 struct State {
     /// "signer:nonce" -> the voucher that spent that nonce and its tx, when this relayer sent it.
-    /// Bounded like the rest: a relayer that runs for months must not grow with every voucher it settled.
-    done: Remembered<Spent>,
+    done: HashMap<String, Spent>,
     /// By signature: the contract's reason, and until when it is repeated unasked.
     refused: Remembered<(String, Instant)>,
     /// "signer:nonce" -> until when a transaction this relayer sent may still be on its way.
@@ -188,7 +189,7 @@ struct State {
 impl State {
     fn new() -> Self {
         Self {
-            done: Remembered::new(),
+            done: HashMap::new(),
             refused: Remembered::new(),
             in_flight: Remembered::new(),
             by_seq: Remembered::new(),
@@ -204,6 +205,13 @@ impl State {
         match record {
             Record::Seen { slot, voucher } => self.by_seq.insert(slot, voucher),
             Record::Pair { signer, a, b } => {
+                // Pairs cost nothing to make, so the list must not fill up with junk a real
+                // double-spender then cannot get into: a full list drops its oldest closed pair.
+                if self.equivocations.len() >= MAX_PROOFS {
+                    if let Some(at) = self.equivocations.iter().position(Proof::closed) {
+                        self.equivocations.remove(at);
+                    }
+                }
                 if self.equivocations.len() < MAX_PROOFS {
                     self.equivocations.push(Proof::new(signer, a, b));
                 }
@@ -426,7 +434,7 @@ impl<C: Chain> Settler<C> {
         expired: bool,
     ) -> Result<Outcome, ChainError> {
         let slot = format!("{signer}:{}", v.payload.nonce);
-        let spent = state.done.entries.get(&slot).cloned();
+        let spent = state.done.get(&slot).cloned();
         if let Some(spent) = &spent {
             // A nonce settles one voucher. Another voucher on the same nonce did not get paid by that
             // transaction, so it must not be told "settled".
@@ -516,9 +524,10 @@ impl State {
             Some(first) if first.payload == v.payload => return None,
             Some(first) => first.clone(),
         };
-        let at = match self.equivocations.iter().rposition(|p| p.b.payload == v.payload) {
+        let known = |state: &Self| state.equivocations.iter().rposition(|p| p.b.payload == v.payload);
+        let at = match known(self) {
             Some(at) => at,
-            None if self.equivocations.len() < MAX_PROOFS => {
+            None => {
                 log(format!(
                     "double-spend by {signer}: two vouchers with sequence number {seq}"
                 ));
@@ -527,10 +536,59 @@ impl State {
                     a: first,
                     b: v.clone(),
                 });
-                self.equivocations.len() - 1
+                known(self)? // not there if the list is full of pairs still waiting on the chain
             }
-            None => return None,
         };
         self.equivocations[at].start_if_due(Instant::now())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn voucher(n: usize) -> SignedVoucher {
+        serde_json::from_value(json!({
+            "standard": "nep413",
+            "payload": { "message": "{}", "nonce": "AAAA", "recipient": "intents.near" },
+            "public_key": "ed25519:k",
+            "signature": format!("ed25519:{n}"),
+        }))
+        .unwrap()
+    }
+
+    fn pair(signer: &str, n: usize) -> Record {
+        Record::Pair {
+            signer: signer.into(),
+            a: voucher(2 * n),
+            b: voucher(2 * n + 1),
+        }
+    }
+
+    // Anyone with a key can mint pairs for free, and the journal brings them back on every restart.
+    // If they could fill the list, a real double-spender could never be recorded.
+    #[test]
+    fn a_full_list_makes_room_for_a_new_pair_by_dropping_one_already_judged() {
+        let mut state = State::new();
+        for n in 0..MAX_PROOFS {
+            state.apply(pair("junk", n));
+        }
+        state.apply(pair("real", MAX_PROOFS));
+        assert!(
+            state.equivocations.iter().all(|p| p.signer == "junk"),
+            "no room while every pair still waits on the chain"
+        );
+
+        let judged = voucher(1).signature; // the oldest pair's second voucher
+        state.apply(Record::Answer {
+            b: judged.clone(),
+            tx: None,
+            refusal: Some("nothing at stake".into()),
+        });
+        state.apply(pair("real", MAX_PROOFS));
+        assert_eq!(state.equivocations.len(), MAX_PROOFS);
+        assert!(state.equivocations.iter().any(|p| p.signer == "real"));
+        assert!(state.equivocations.iter().all(|p| p.b.signature != judged));
     }
 }

@@ -5,5 +5,5 @@ testdata
 .git
 relayer/.env
 relayer/voucher.json
-*.key
-.env
+**/*.key
+**/.env

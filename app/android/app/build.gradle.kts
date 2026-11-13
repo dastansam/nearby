@@ -12,6 +12,7 @@ plugins {
 // `flutter run --release` still works, but that APK is not one to publish.
 val keystoreFile = rootProject.file("key.properties")
 val keystore = Properties().apply { if (keystoreFile.exists()) keystoreFile.inputStream().use { load(it) } }
+fun signingProperty(name: String) = keystore.getProperty(name) ?: error("android/key.properties has no $name")
 
 android {
     namespace = "dev.nearby.nearby"
@@ -41,10 +42,10 @@ android {
     signingConfigs {
         if (keystoreFile.exists()) {
             create("release") {
-                storeFile = rootProject.file(keystore.getProperty("storeFile"))
-                storePassword = keystore.getProperty("storePassword")
-                keyAlias = keystore.getProperty("keyAlias")
-                keyPassword = keystore.getProperty("keyPassword")
+                storeFile = rootProject.file(signingProperty("storeFile"))
+                storePassword = signingProperty("storePassword")
+                keyAlias = signingProperty("keyAlias")
+                keyPassword = signingProperty("keyPassword")
             }
         }
     }

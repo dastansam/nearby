@@ -7,7 +7,7 @@
 //!                                 separate from RELAYER_KEY.
 //! Optional: NEAR_RPC, PORT (default 8787),
 //!   STATE_FILE      where double-spends found are kept across restarts (without it they are lost),
-//!   SKIP_PREFLIGHT  to start without checking the account, key and bond contract first.
+//!   SKIP_PREFLIGHT  set to 1 to start without checking the account, key and bond contract first.
 use chrono::Utc;
 use nearby_relayer::chain::{seed_key, NearChain};
 use nearby_relayer::server::router_with;
@@ -28,7 +28,7 @@ async fn main() -> Result<(), String> {
         .map_or(Ok(8787), |port| port.parse())
         .map_err(|_| "PORT is not a port number")?;
 
-    if env("SKIP_PREFLIGHT").is_none() {
+    if env("SKIP_PREFLIGHT").as_deref() != Some("1") {
         for line in chain.preflight().await? {
             log(line);
         }
