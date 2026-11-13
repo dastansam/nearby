@@ -87,6 +87,9 @@ pub struct Proof {
     /// deadline, not a flag, so a slashing whose task never reports back does not hold it for ever.
     #[serde(skip)]
     retry_after: Option<Instant>,
+    /// How many times the pair has been sent. An attempt's answer counts only while it is the latest.
+    #[serde(skip)]
+    attempt: u64,
 }
 
 /// A map that forgets its oldest entry once full. These are fed by anyone who can sign.
@@ -200,7 +203,7 @@ impl<C: Chain> Settler<C> {
     /// Hands a pair to the bond contract, in a task of its own: the vouchers still go to
     /// intents.near meanwhile, and a slow slashing holds up nobody's settlement. (The chain sends
     /// one transaction at a time, so the two cannot race for the key's nonce.)
-    fn slash(&self, signer: String, a: SignedVoucher, b: SignedVoucher, attempt: Instant) {
+    fn slash(&self, signer: String, a: SignedVoucher, b: SignedVoucher, attempt: u64) {
         let (chain, state) = (Arc::clone(&self.chain), Arc::clone(&self.state));
         tokio::spawn(async move {
             let result = chain.slash(&signer, &a, &b).await;
@@ -212,7 +215,7 @@ impl<C: Chain> Settler<C> {
                 Ok(tx) => (proof.tx, proof.refusal, proof.retry_after) = (Some(tx), None, None),
                 // An attempt given up on, back late: it says nothing about the one now on its way,
                 // or about a slashing that has landed since.
-                Err(_) if proof.retry_after != Some(attempt) => {}
+                Err(_) if proof.attempt != attempt => {}
                 Err(ChainError::Refused(why)) => {
                     (proof.refusal, proof.retry_after) = (Some(why), Some(Instant::now() + PROOF_RETRY))
                 }
@@ -324,13 +327,13 @@ impl<C: Chain> Settler<C> {
 impl State {
     /// Both vouchers of a pair still go to the chain, which settles whichever the balance allows.
     /// Returns the pair to hand to the bond contract, when there is one it has not answered about,
-    /// with the deadline that names this attempt.
+    /// and which attempt this is.
     fn note_sequence(
         &mut self,
         signer: &str,
         seq: &str,
         v: &SignedVoucher,
-    ) -> Option<(SignedVoucher, SignedVoucher, Instant)> {
+    ) -> Option<(SignedVoucher, SignedVoucher, u64)> {
         let slot = format!("{signer}:{seq}");
         let Some(first) = self.by_seq.entries.get(&slot) else {
             self.by_seq.insert(slot, v.clone());
@@ -351,6 +354,7 @@ impl State {
                     tx: None,
                     refusal: None,
                     retry_after: None,
+                    attempt: 0,
                 });
                 self.equivocations.last_mut().expect("just pushed")
             }
@@ -360,8 +364,8 @@ impl State {
         if proof.tx.is_some() || proof.retry_after.is_some_and(|after| after > now) {
             return None;
         }
-        let attempt = now + IN_FLIGHT;
-        proof.retry_after = Some(attempt);
-        Some((proof.a.clone(), proof.b.clone(), attempt))
+        proof.retry_after = Some(now + IN_FLIGHT);
+        proof.attempt += 1;
+        Some((proof.a.clone(), proof.b.clone(), proof.attempt))
     }
 }

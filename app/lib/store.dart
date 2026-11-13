@@ -97,9 +97,8 @@ class VoucherStore {
     final stored = await _db.transaction<StoredVoucher?>((txn) async {
       final held = await txn.query('vouchers', columns: _columns, where: 'key = ?', whereArgs: [key]);
       if (held.isEmpty) {
-        final row = {'key': key, 'kind': kind.name, 'hops': hops, 'json': json, 'created_at': DateTime.now().millisecondsSinceEpoch};
-        await txn.insert('vouchers', row);
-        return _stored(row);
+        await txn.insert('vouchers', {'key': key, 'kind': kind.name, 'hops': hops, 'json': json, 'created_at': DateTime.now().millisecondsSinceEpoch});
+        return (kind: kind, hops: hops, voucher: voucher, outcome: null, tx: null, settledBlock: null);
       }
       final claim = held.single['kind'] == VoucherKind.relayed.name &&
           kind != VoucherKind.relayed &&

@@ -11,7 +11,6 @@
 //! themselves, getting the bond back at once and shutting the real merchants out with a ban.
 //! Compensating the merchant who was left unpaid needs settlement evidence this contract does not
 //! have, and is roadmap.
-use near_sdk::json_types::U64;
 use near_sdk::store::LookupMap;
 use near_sdk::{env, near, require, AccountId, Gas, NearToken, Promise, PromiseError};
 use voucher::{parse_voucher, transfer, Parsed, SignedVoucher, Transfer};
@@ -37,6 +36,13 @@ pub enum Lock {
         /// Set by `unbond`: the bond no longer backs new payments and can be withdrawn after the
         /// delay, and is still slashable until then.
         unbonding_since: Option<u64>,
+    },
+    /// `withdraw`'s transfer is on its way: nothing backs payments or is at stake, and nothing can
+    /// be bonded over it. `withdrawn` closes it, or puts the bond back if the transfer failed.
+    Withdrawing {
+        amount: NearToken,
+        owner: AccountId,
+        since: u64,
     },
     /// Slashed. For good: the key is a known cheat.
     Banned,
@@ -69,6 +75,7 @@ impl Bonds {
         require!(deposit >= MIN_BOND, "attach at least 1 NEAR");
         let lock = match self.locks.get(&account) {
             Some(Lock::Banned) => env::panic_str("banned"),
+            Some(Lock::Withdrawing { .. }) => env::panic_str("withdrawing"),
             Some(Lock::Bonded {
                 amount,
                 owner,
@@ -102,7 +109,7 @@ impl Bonds {
     }
 
     /// Returns `account`'s bond to its owner once the unbonding delay has passed. The lock is
-    /// removed first, so the bond cannot be withdrawn twice, and put back if the transfer fails.
+    /// marked first, so the bond cannot be withdrawn twice, and put back if the transfer fails.
     pub fn withdraw(&mut self, account: AccountId) -> Promise {
         let Some(Lock::Bonded {
             amount,
@@ -118,45 +125,38 @@ impl Bonds {
             "still unbonding"
         );
         let (amount, owner, since) = (*amount, owner.clone(), *since);
-        self.locks.remove(&account);
-        Promise::new(owner.clone()).transfer(amount).then(
+        self.locks.insert(
+            account.clone(),
+            Lock::Withdrawing {
+                amount,
+                owner: owner.clone(),
+                since,
+            },
+        );
+        Promise::new(owner).transfer(amount).then(
             Self::ext(env::current_account_id())
                 .with_static_gas(Gas::from_tgas(10))
-                .withdrawn(account, amount, owner, U64(since)),
+                .withdrawn(account),
         )
     }
 
     /// After `withdraw`'s transfer. If it failed (the owner's account is gone, say), the bond is
     /// put back as it was, still unbonding, rather than left here with no record of who it is owed
-    /// to; `withdraw` can be called again. Unless the slot was taken meanwhile: a bond someone else
-    /// has since locked, or a ban, is not overwritten, and the NEAR stays here, logged.
+    /// to; `withdraw` can be called again.
     #[private]
-    pub fn withdrawn(
-        &mut self,
-        account: AccountId,
-        amount: NearToken,
-        owner: AccountId,
-        since: U64,
-        #[callback_result] transfer: Result<(), PromiseError>,
-    ) {
-        if transfer.is_ok() {
-            return;
-        }
-        if self.locks.contains_key(&account) {
-            env::log_str(&format!(
-                "{} yoctoNEAR could not be returned to {owner} and {account} was bonded again meanwhile",
-                amount.as_yoctonear()
-            ));
-            return;
-        }
-        self.locks.insert(
-            account,
-            Lock::Bonded {
-                amount,
-                owner,
-                unbonding_since: Some(since.0),
-            },
-        );
+    pub fn withdrawn(&mut self, account: AccountId, #[callback_result] transfer: Result<(), PromiseError>) {
+        let Some(Lock::Withdrawing { amount, owner, since }) = self.locks.get(&account) else {
+            env::panic_str("not withdrawing")
+        };
+        let restored = Lock::Bonded {
+            amount: *amount,
+            owner: owner.clone(),
+            unbonding_since: Some(*since),
+        };
+        match transfer {
+            Ok(()) => self.locks.remove(&account),
+            Err(_) => self.locks.insert(account, restored),
+        };
     }
 
     /// What backs `account`'s payments right now: nothing while unbonding or once banned.
@@ -205,7 +205,8 @@ impl Bonds {
         let bond = match self.locks.get(&account) {
             Some(Lock::Bonded { amount, .. }) => *amount,
             Some(Lock::Banned) => env::panic_str("already slashed"),
-            None => env::panic_str("nothing at stake"),
+            // Withdrawing: the NEAR is on its way out, after the 7 days every voucher had to arrive in.
+            Some(Lock::Withdrawing { .. }) | None => env::panic_str("nothing at stake"),
         };
         self.locks.insert(account, Lock::Banned);
         env::log_str(&format!(
@@ -271,6 +272,14 @@ mod tests {
             .predecessor_account_id(from.parse().unwrap())
             .attached_deposit(NearToken::from_yoctonear(deposit))
             .block_timestamp(at_ns)
+            .build());
+    }
+
+    /// The contract calling itself back after a promise.
+    fn callback() {
+        testing_env!(VMContextBuilder::new()
+            .current_account_id("bond.near".parse().unwrap())
+            .predecessor_account_id("bond.near".parse().unwrap())
             .build());
     }
 
@@ -401,24 +410,15 @@ mod tests {
     #[test]
     fn a_withdrawal_whose_transfer_failed_is_put_back_to_try_again() {
         let (k, mut c) = unbonding(NEAR);
-        let (me, wallet): (AccountId, AccountId) = (account(&k), "wallet.near".parse().unwrap());
+        let me = account(&k);
         call("wallet.near", 0, 1_000 + UNBONDING_NS);
         let _ = c.withdraw(me.clone());
         assert!(
             c.at_stake(me.clone()).is_zero(),
             "nothing to slash or withdraw twice meanwhile"
         );
-        testing_env!(VMContextBuilder::new()
-            .current_account_id("bond.near".parse().unwrap())
-            .predecessor_account_id("bond.near".parse().unwrap())
-            .build());
-        c.withdrawn(
-            me.clone(),
-            NearToken::from_yoctonear(NEAR),
-            wallet.clone(),
-            U64(1_000),
-            Err(PromiseError::Failed),
-        );
+        callback();
+        c.withdrawn(me.clone(), Err(PromiseError::Failed));
         assert_eq!(c.at_stake(me.clone()).as_yoctonear(), NEAR);
         assert!(
             c.bond_of(me.clone()).is_zero(),
@@ -426,38 +426,21 @@ mod tests {
         );
         call("wallet.near", 0, 1_000 + UNBONDING_NS);
         let _ = c.withdraw(me.clone());
-        c.withdrawn(me.clone(), NearToken::from_yoctonear(NEAR), wallet, U64(1_000), Ok(()));
+        callback();
+        c.withdrawn(me.clone(), Ok(()));
         assert!(c.at_stake(me).is_zero());
     }
 
-    // The slot is empty while the transfer runs. If another bond landed in it meanwhile, putting
-    // the old one back would swallow the new owner's NEAR with no record.
+    // While the transfer runs the slot is neither free nor a bond: a stranger bonding it then
+    // would be overwritten, or overwrite the bond put back after a failed transfer.
     #[test]
-    fn a_failed_withdrawal_does_not_overwrite_a_bond_locked_meanwhile() {
+    #[should_panic(expected = "withdrawing")]
+    fn a_bond_on_its_way_out_cannot_be_bonded_over() {
         let (k, mut c) = unbonding(NEAR);
-        let me = account(&k);
         call("wallet.near", 0, 1_000 + UNBONDING_NS);
-        let _ = c.withdraw(me.clone());
+        let _ = c.withdraw(account(&k));
         call("stranger.near", 2 * NEAR, 1_000 + UNBONDING_NS);
-        c.bond_for(me.clone());
-        testing_env!(VMContextBuilder::new()
-            .current_account_id("bond.near".parse().unwrap())
-            .predecessor_account_id("bond.near".parse().unwrap())
-            .build());
-        c.withdrawn(
-            me.clone(),
-            NearToken::from_yoctonear(NEAR),
-            "wallet.near".parse().unwrap(),
-            U64(1_000),
-            Err(PromiseError::Failed),
-        );
-        assert_eq!(
-            c.bond_of(me.clone()).as_yoctonear(),
-            2 * NEAR,
-            "the stranger's bond, untouched"
-        );
-        call("stranger.near", 0, 1_000 + UNBONDING_NS);
-        c.unbond(me);
+        c.bond_for(account(&k));
     }
 
     #[test]
