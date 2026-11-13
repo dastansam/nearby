@@ -615,6 +615,142 @@ async fn a_refused_pair_is_sent_again_after_a_rest() {
     assert_eq!((proof.tx.as_deref(), proof.refusal.as_deref()), (Some("slash1"), None));
 }
 
+/// A journal file that is gone when the test is, passed or failed.
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn new() -> Self {
+        Self(std::env::temp_dir().join(format!("nearby-relayer-test-{:x}", rand::random::<u64>())))
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        std::fs::remove_file(&self.0).ok();
+    }
+}
+
+// The first voucher of a pair settles, and from then on no phone uploads it again. If the relayer
+// forgets it on a restart, the second one looks like an honest payment and the cheat keeps the bond.
+#[tokio::test]
+async fn a_pair_is_found_even_if_the_relayer_restarted_between_its_two_vouchers() {
+    let (path, chain) = (Scratch::new(), FakeChain::new());
+    let (first, second) = pair();
+    let before = Settler::with_journal(chain.clone(), &path.0).unwrap();
+    settle(&before, &[&first]).await;
+    drop(before);
+    let after = Settler::with_journal(chain.clone(), &path.0).unwrap();
+    settle(&after, &[&second]).await;
+    settle_down().await;
+    assert_eq!(chain.state().slashed, [(first, second)]);
+    assert_eq!(after.equivocations().await[0].tx.as_deref(), Some("slash1"));
+}
+
+// Slashing is paid for in gas and the contract would only refuse it: a restart must not send a
+// pair again that the chain has already taken a bond for.
+#[tokio::test(start_paused = true)]
+async fn a_slashing_already_done_is_not_sent_again_after_a_restart() {
+    let (path, chain) = (Scratch::new(), FakeChain::new());
+    let (first, second) = pair();
+    let before = Settler::with_journal(chain.clone(), &path.0).unwrap();
+    settle(&before, &[&first, &second]).await;
+    settle_down().await;
+    drop(before);
+    let after = Settler::with_journal(chain.clone(), &path.0).unwrap();
+    after.sweep().await;
+    settle_down().await;
+    assert_eq!(chain.state().slashed.len(), 1, "one slashing, not two");
+    assert_eq!(after.equivocations().await[0].tx.as_deref(), Some("slash1"));
+}
+
+// A pair the chain has not answered about is picked up on a restart without anyone uploading
+// anything: its vouchers have settled, so nobody will.
+#[tokio::test(start_paused = true)]
+async fn a_pair_not_slashed_before_a_restart_is_slashed_after_it() {
+    let (path, chain) = (Scratch::new(), FakeChain::new());
+    let (first, second) = pair();
+    let before = Settler::with_journal(chain.clone(), &path.0).unwrap();
+    settle(&before, &[&first]).await;
+    chain.state().down = true;
+    settle(&before, &[&second]).await;
+    settle_down().await;
+    drop(before);
+    chain.state().down = false;
+    let after = Settler::with_journal(chain.clone(), &path.0).unwrap();
+    after.sweep().await;
+    settle_down().await;
+    assert_eq!(after.equivocations().await[0].tx.as_deref(), Some("slash1"));
+}
+
+// Phones stop uploading a voucher once it has settled, so "the next upload" may never come.
+#[tokio::test(start_paused = true)]
+async fn a_pair_lost_to_an_outage_is_retried_without_waiting_for_an_upload() {
+    let chain = FakeChain::new();
+    let settler = Settler::new(chain.clone());
+    let (first, second) = pair();
+    settle(&settler, &[&first]).await;
+    chain.state().down = true;
+    settle(&settler, &[&second]).await;
+    settle_down().await;
+    chain.state().down = false;
+    settler.sweep().await;
+    settle_down().await;
+    assert!(chain.state().slashed.is_empty(), "the first attempt may still land");
+    tokio::time::advance(std::time::Duration::from_secs(120)).await;
+    settler.sweep().await;
+    settle_down().await;
+    assert_eq!(settler.equivocations().await[0].tx.as_deref(), Some("slash1"));
+}
+
+// The contract judged the pair. Asking an hour later, and every hour after, only costs the chain
+// (and, with a bond at stake, the relayer's gas) for the same answer.
+#[tokio::test(start_paused = true)]
+async fn a_pair_the_contract_judged_is_not_asked_about_again() {
+    let chain = FakeChain::new();
+    chain.state().refuse_slash = Some("different sequence numbers");
+    let settler = Settler::new(chain.clone());
+    let (first, second) = pair();
+    settle(&settler, &[&first, &second]).await;
+    settle_down().await;
+    let asked = chain.state().lookups;
+    tokio::time::advance(std::time::Duration::from_secs(3 * 60 * 60)).await;
+    settler.sweep().await;
+    settle_down().await;
+    assert_eq!(chain.state().lookups, asked, "the chain was not asked again");
+    assert_eq!(
+        settler.equivocations().await[0].refusal.as_deref(),
+        Some("different sequence numbers")
+    );
+}
+
+// Pairs cost nothing to make, so a sweep must not turn thousands of them into thousands of calls.
+#[tokio::test(start_paused = true)]
+async fn a_sweep_sends_a_few_pairs_at_a_time() {
+    let chain = FakeChain::new();
+    chain.state().down = true;
+    let settler = Settler::new(chain.clone());
+    // Thirty different payers, each caught double-spending.
+    for payer in 10..40u8 {
+        let numbered = |to| {
+            Pay {
+                key: SigningKey::from_bytes(&[payer; 32]),
+                to,
+                memo: Some("seq:4 prev:00"),
+                ..Pay::default()
+            }
+            .sign()
+        };
+        settle(&settler, &[&numbered("cafe.near"), &numbered("kiosk.near")]).await;
+    }
+    settle_down().await;
+    assert_eq!(settler.equivocations().await.len(), 30);
+    chain.state().down = false;
+    tokio::time::advance(std::time::Duration::from_secs(120)).await;
+    settler.sweep().await;
+    settle_down().await;
+    assert_eq!(chain.state().slashed.len(), 20);
+}
+
 /// A pair uploaded while the chain hangs on slashings: the first attempt is stuck, later ones are not.
 async fn hung_first_slashing() -> (Arc<FakeChain>, Settler<FakeChain>, SignedVoucher) {
     let chain = FakeChain::new();

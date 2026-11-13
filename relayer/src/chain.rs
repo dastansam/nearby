@@ -167,6 +167,63 @@ impl NearChain {
             .ok_or_else(|| ChainError::Unknown(format!("{method} is not a string: {value}")))
     }
 
+    /// Checks the setup before the first voucher arrives, so a wrong account, key or bond contract
+    /// stops the relayer at the start instead of failing a payment in front of a customer. Returns
+    /// what to tell the operator, or why it cannot run.
+    pub async fn preflight(&self) -> Result<Vec<String>, String> {
+        /// A settlement reserves 0.03 NEAR for its prepaid gas until the unused part is refunded.
+        const LOW: u128 = 500_000_000_000_000_000_000_000;
+        let public_key = self.key.verifying_key().to_bytes();
+        let account = self
+            .call(
+                "query",
+                json!({ "request_type": "view_account", "finality": "final", "account_id": self.account }),
+            )
+            .await
+            .map_err(|e| {
+                format!(
+                    "RELAYER_ACCOUNT {} cannot be read on the network: {}",
+                    self.account,
+                    e.reason()
+                )
+            })?;
+        let balance: u128 = account["amount"]
+            .as_str()
+            .and_then(|amount| amount.parse().ok())
+            .ok_or_else(|| format!("RELAYER_ACCOUNT {} has no balance in {account}", self.account))?;
+        self.call(
+            "query",
+            json!({ "request_type": "view_access_key", "finality": "final", "account_id": self.account, "public_key": tag(&public_key) }),
+        )
+        .await
+            .map_err(|e| {
+                format!(
+                    "RELAYER_KEY is not an access key of {}: {}",
+                    self.account,
+                    e.reason()
+                )
+            })?;
+        self.yocto("bond_of", &"0".repeat(64)).await.map_err(|e| {
+            format!(
+                "BOND_CONTRACT {} does not answer bond_of: {}",
+                self.bond_contract,
+                e.reason()
+            )
+        })?;
+        let near = balance as f64 / 1e24;
+        let mut lines = vec![format!(
+            "{} holds {near:.3} NEAR, its key is valid, {} answers",
+            self.account, self.bond_contract
+        )];
+        if balance < LOW {
+            lines.push(format!(
+                "WARNING: {near:.3} NEAR is low for paying gas; top up {}",
+                self.account
+            ));
+        }
+        Ok(lines)
+    }
+
     /// Calls `method` on `contract` with `args` and no deposit, paying gas, and returns the
     /// transaction hash once it has run. Refused if the call failed.
     async fn send(&self, contract: &str, method: &str, args: Value) -> Result<String, ChainError> {
@@ -294,6 +351,12 @@ fn failed(failure: &Value) -> ChainError {
 
 /// An RPC error or failed execution, as a refusal when it is the contract panicking.
 fn classify(error: &Value) -> ChainError {
+    // The network refused the relayer's own transaction before running it (out of NEAR for gas, a
+    // stale nonce): that says nothing about any voucher, and a phone cannot act on the detail.
+    if let Some(invalid) = error["error"]["data"]["TxExecutionError"]["InvalidTxError"].as_object() {
+        let kind = invalid.keys().next().map_or("unknown", String::as_str);
+        return ChainError::Unknown(format!("the relayer cannot send transactions right now ({kind})"));
+    }
     static DEBUG_FORM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"panic_msg: "((?:[^"\\]|\\.)*)""#).unwrap());
     // Nodes spell a panic three ways: a "panic_msg" field, Rust debug text holding one, or a sentence.
     fn panic_in(v: &Value) -> Option<String> {
@@ -314,7 +377,13 @@ fn classify(error: &Value) -> ChainError {
     }
     match panic_in(error) {
         Some(reason) => ChainError::Refused(reason),
-        None => ChainError::Unknown(error.to_string()),
+        // Said in the node's own words when it has some, so no one downstream is shown its JSON.
+        None => ChainError::Unknown(
+            error["error"]["data"]
+                .as_str()
+                .or_else(|| error["result"]["error"].as_str())
+                .map_or_else(|| error.to_string(), str::to_owned),
+        ),
     }
 }
 
@@ -394,6 +463,71 @@ mod tests {
             STANDARD.encode(sign(&key, tx)),
             "DAAAAHJlbGF5ZXIubmVhcgDtSSjGKNHCxurpAziQWZVhKVknOlxj+TY2wUYUrIc30XnfDYZIcAAADAAAAGludGVudHMubmVhcgkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJAQAAAAIPAAAAZXhlY3V0ZV9pbnRlbnRzFAAAAHsic2lnbmVkIjpbeyJhIjoxfV19AMBuMdkQAQAAAAAAAAAAAAAAAAAAAAAAAPDbVIaWuhrFnP4GMd7vrGQmX32eImYjO3+1Ji2puDe4EIVBvPjKIK8WHWPo+MnBSOHT71Vrdb5k/uk+EajQLAs="
         );
+    }
+
+    // Against a real node, for nothing: a well-formed transaction from an account that does not
+    // exist. A node that cannot parse the encoding or the request says so; one that can says the
+    // signer is missing. Run by hand: cargo test -p nearby-relayer live_ -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "needs the network"]
+    async fn live_node_parses_our_send_tx() {
+        let key = SigningKey::from_bytes(&rand::random());
+        let chain = NearChain::new("nobody-nearby-test.near".into(), key.clone(), None, "bond.near".into());
+        let block = chain.call("block", json!({ "finality": "final" })).await.unwrap();
+        let hash: [u8; 32] = block["header"]["hash"].as_str().and_then(untag).unwrap();
+        let tx = function_call(
+            "nobody-nearby-test.near",
+            key.verifying_key().as_bytes(),
+            1,
+            &hash,
+            VERIFYING_CONTRACT,
+            "execute_intents",
+            br#"{"signed":[]}"#,
+        );
+        let sent = json!({ "signed_tx_base64": STANDARD.encode(sign(&key, tx)), "wait_until": "EXECUTED_OPTIMISTIC" });
+        let answer = chain.call("send_tx", sent).await;
+        println!("node said: {answer:?}");
+        let said = format!("{answer:?}");
+        assert!(
+            !said.contains("PARSE") && !said.contains("Parse") && !said.contains("eserializ"),
+            "{said}"
+        );
+    }
+
+    // The relayer's own transaction can be turned away before it runs. Phones are shown the reason,
+    // so it must read as the relayer's problem, in words, and never as a verdict on the voucher.
+    #[test]
+    fn a_transaction_the_network_turns_away_is_the_relayers_problem_not_the_vouchers() {
+        // As mainnet answered a transaction from an account that does not exist.
+        let node = json!({"jsonrpc":"2.0","error":{"name":"HANDLER_ERROR","cause":{"info":{},"name":"INVALID_TRANSACTION"},"code":-32000,"message":"Server error","data":{"TxExecutionError":{"InvalidTxError":{"SignerDoesNotExist":{"signer_id":"relayer.near"}}}}},"id":"nearby"});
+        assert_eq!(
+            classify(&node),
+            ChainError::Unknown("the relayer cannot send transactions right now (SignerDoesNotExist)".into())
+        );
+    }
+
+    // Against a real node. Run by hand: cargo test -p nearby-relayer live_ -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "needs the network"]
+    async fn live_preflight_names_the_mistake() {
+        let key = SigningKey::from_bytes(&rand::random());
+        let nobody = NearChain::new("nobody-nearby-test.near".into(), key.clone(), None, "bond.near".into());
+        let said = nobody.preflight().await.unwrap_err();
+        println!("{said}");
+        assert_eq!(
+            said,
+            "RELAYER_ACCOUNT nobody-nearby-test.near cannot be read on the network: \
+             account nobody-nearby-test.near does not exist while viewing"
+        );
+        // A real account, a key that is not one of its keys.
+        let wrong_key = NearChain::new("intents.near".into(), key, None, "bond.near".into());
+        let said = wrong_key.preflight().await.unwrap_err();
+        println!("{said}");
+        assert!(
+            said.starts_with("RELAYER_KEY is not an access key of intents.near: access key ed25519:"),
+            "{said}"
+        );
+        assert!(said.ends_with("does not exist while viewing"), "{said}");
     }
 
     // "Refused" is an answer about the voucher and stops the gas; anything else means try again.
