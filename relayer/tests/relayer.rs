@@ -33,12 +33,12 @@ struct Fake {
     bond: &'static str, // yoctoNEAR the bond contract reports at stake for every account
     refuse_slash: Option<&'static str>,
     no_answer_to_slashing: bool, // the slashing goes through, and the answer never comes back
-    slashing_hangs: bool,        // the slashing call never returns
+    slashing_hangs: bool,        // the slashing call waits until released (FakeChain.1), if ever
     slashed: Vec<(SignedVoucher, SignedVoucher)>,
 }
 
 /// A stand-in for intents.near and the bond contract.
-struct FakeChain(Mutex<Fake>);
+struct FakeChain(Mutex<Fake>, tokio::sync::Notify); // the Notify releases a hung slashing
 
 impl FakeChain {
     fn new() -> Arc<Self> {
@@ -58,7 +58,7 @@ impl FakeChain {
             slashing_hangs: false,
             slashed: Vec::new(),
         };
-        Arc::new(Self(Mutex::new(fake)))
+        Arc::new(Self(Mutex::new(fake), tokio::sync::Notify::new()))
     }
 
     fn state(&self) -> MutexGuard<'_, Fake> {
@@ -121,7 +121,7 @@ impl Chain for FakeChain {
 
     async fn slash(&self, signer: &str, a: &SignedVoucher, b: &SignedVoucher) -> Result<String, ChainError> {
         if self.reach().await?.slashing_hangs {
-            return std::future::pending().await;
+            self.1.notified().await;
         }
         let mut fake = self.reach().await?;
         let banned = fake.slashed.iter().any(|(first, _)| account_of(first) == signer);
@@ -622,6 +622,28 @@ async fn a_slashing_that_never_reports_back_is_sent_again_after_the_in_flight_ti
     settle(&settler, &[&second]).await;
     settle_down().await;
     assert_eq!(settler.equivocations().await[0].tx.as_deref(), Some("slash1"));
+}
+
+// The first attempt was given up on and a second one slashed the key. When the first comes back at
+// last, refused by a contract that has already banned the key, it must not write that refusal over
+// the record of the slashing.
+#[tokio::test(start_paused = true)]
+async fn an_attempt_given_up_on_does_not_speak_for_the_pair_when_it_comes_back() {
+    let chain = FakeChain::new();
+    chain.state().slashing_hangs = true;
+    let settler = Settler::new(chain.clone());
+    let (first, second) = pair();
+    settle(&settler, &[&first, &second]).await;
+    settle_down().await;
+    chain.state().slashing_hangs = false;
+    tokio::time::advance(std::time::Duration::from_secs(120)).await;
+    settle(&settler, &[&second]).await;
+    settle_down().await;
+    chain.1.notify_one();
+    settle_down().await;
+    let proof = &settler.equivocations().await[0];
+    assert_eq!((proof.tx.as_deref(), proof.refusal.as_deref()), (Some("slash1"), None));
+    assert_eq!(chain.state().slashed.len(), 1);
 }
 
 // The slashing landed but its answer was lost. Sending it again would burn gas on a transaction the

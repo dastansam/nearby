@@ -200,7 +200,7 @@ impl<C: Chain> Settler<C> {
     /// Hands a pair to the bond contract, in a task of its own: the vouchers still go to
     /// intents.near meanwhile, and a slow slashing holds up nobody's settlement. (The chain sends
     /// one transaction at a time, so the two cannot race for the key's nonce.)
-    fn slash(&self, signer: String, a: SignedVoucher, b: SignedVoucher) {
+    fn slash(&self, signer: String, a: SignedVoucher, b: SignedVoucher, attempt: Instant) {
         let (chain, state) = (Arc::clone(&self.chain), Arc::clone(&self.state));
         tokio::spawn(async move {
             let result = chain.slash(&signer, &a, &b).await;
@@ -208,14 +208,16 @@ impl<C: Chain> Settler<C> {
             let Some(proof) = state.equivocations.iter_mut().rfind(|p| p.b.signature == b.signature) else {
                 return;
             };
-            proof.retry_after = None;
             match result {
-                Ok(tx) => (proof.tx, proof.refusal) = (Some(tx), None),
+                Ok(tx) => (proof.tx, proof.refusal, proof.retry_after) = (Some(tx), None, None),
+                // An attempt given up on, back late: it says nothing about the one now on its way,
+                // or about a slashing that has landed since.
+                Err(_) if proof.retry_after != Some(attempt) => {}
                 Err(ChainError::Refused(why)) => {
                     (proof.refusal, proof.retry_after) = (Some(why), Some(Instant::now() + PROOF_RETRY))
                 }
                 // Nothing is known: the next upload of the voucher sends the pair again.
-                Err(ChainError::Unknown(_)) => {}
+                Err(ChainError::Unknown(_)) => proof.retry_after = None,
             }
         });
     }
@@ -227,8 +229,8 @@ impl<C: Chain> Settler<C> {
             seq,
             expired,
         } = payment;
-        if let Some((a, b)) = seq.and_then(|seq| state.note_sequence(&signer, &seq, &v)) {
-            self.slash(signer.clone(), a, b);
+        if let Some((a, b, attempt)) = seq.and_then(|seq| state.note_sequence(&signer, &seq, &v)) {
+            self.slash(signer.clone(), a, b, attempt);
         }
         match self.ask_chain(state, &v, &signer, expired).await {
             Ok(outcome) => outcome,
@@ -321,8 +323,14 @@ impl<C: Chain> Settler<C> {
 
 impl State {
     /// Both vouchers of a pair still go to the chain, which settles whichever the balance allows.
-    /// Returns the pair to hand to the bond contract, when there is one it has not answered about.
-    fn note_sequence(&mut self, signer: &str, seq: &str, v: &SignedVoucher) -> Option<(SignedVoucher, SignedVoucher)> {
+    /// Returns the pair to hand to the bond contract, when there is one it has not answered about,
+    /// with the deadline that names this attempt.
+    fn note_sequence(
+        &mut self,
+        signer: &str,
+        seq: &str,
+        v: &SignedVoucher,
+    ) -> Option<(SignedVoucher, SignedVoucher, Instant)> {
         let slot = format!("{signer}:{seq}");
         let Some(first) = self.by_seq.entries.get(&slot) else {
             self.by_seq.insert(slot, v.clone());
@@ -352,7 +360,8 @@ impl State {
         if proof.tx.is_some() || proof.retry_after.is_some_and(|after| after > now) {
             return None;
         }
-        proof.retry_after = Some(now + IN_FLIGHT);
-        Some((proof.a.clone(), proof.b.clone()))
+        let attempt = now + IN_FLIGHT;
+        proof.retry_after = Some(attempt);
+        Some((proof.a.clone(), proof.b.clone(), attempt))
     }
 }

@@ -91,8 +91,9 @@ class VoucherStore {
   /// before they scan it. Storing that identical voucher as their own then succeeds.
   Future<bool> put(Map<String, dynamic> voucher, VoucherKind kind, {int hops = 0}) async {
     final key = voucherKey(voucher), json = jsonEncode(voucher);
-    // The voucher as stored, or null if it was not. Read inside the transaction: a second query
-    // after it could let a later put() tell its listeners first.
+    // The voucher as stored, or null if it was not. Built from what the transaction read, and
+    // told to listeners straight after it: transactions run one at a time, so nothing awaited in
+    // between can let a later put() tell its listeners first.
     final stored = await _db.transaction<StoredVoucher?>((txn) async {
       final held = await txn.query('vouchers', columns: _columns, where: 'key = ?', whereArgs: [key]);
       if (held.isEmpty) {
