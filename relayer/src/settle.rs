@@ -72,7 +72,7 @@ const MAX_PROOFS: usize = 10_000;
 /// Two vouchers one payer signed with the same sequence number, and what the bond contract made of
 /// them. Until `tx` is set the pair goes to the contract again with an upload of `b`: at once when
 /// nothing is known, after a rest when it refused.
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Clone, Debug)]
 pub struct Proof {
     pub a: SignedVoucher,
     pub b: SignedVoucher,
@@ -201,8 +201,8 @@ impl<C: Chain> Settler<C> {
     }
 
     /// Hands a pair to the bond contract, in a task of its own: the vouchers still go to
-    /// intents.near meanwhile, and a slow slashing holds up nobody's settlement. (The chain sends
-    /// one transaction at a time, so the two cannot race for the key's nonce.)
+    /// intents.near meanwhile. The key signs one transaction at a time, so a settlement waits for
+    /// a slashing only while its transaction is being sent, and the two cannot race for the nonce.
     fn slash(&self, signer: String, a: SignedVoucher, b: SignedVoucher, attempt: u64) {
         let (chain, state) = (Arc::clone(&self.chain), Arc::clone(&self.state));
         tokio::spawn(async move {
@@ -219,8 +219,9 @@ impl<C: Chain> Settler<C> {
                 Err(ChainError::Refused(why)) => {
                     (proof.refusal, proof.retry_after) = (Some(why), Some(Instant::now() + PROOF_RETRY))
                 }
-                // Nothing is known: the next upload of the voucher sends the pair again.
-                Err(ChainError::Unknown(_)) => proof.retry_after = None,
+                // Nothing is known, and the transaction may still land: the pair goes again once
+                // the in-flight time is up, as a settlement would.
+                Err(ChainError::Unknown(_)) => {}
             }
         });
     }
@@ -339,12 +340,13 @@ impl State {
             self.by_seq.insert(slot, v.clone());
             return None;
         };
-        // Compared by signature: two different vouchers may even share a nonce, and only the payer
-        // can produce a signature, so nobody else can make a real pair look already recorded.
-        if first.signature == v.signature {
+        // Compared by what was signed: the contract hashes the message, so a second signature over
+        // the same one is the same voucher, not a pair (two different vouchers may even share a
+        // nonce). Only the payer can sign, so nobody else can make a real pair look already recorded.
+        if first.payload == v.payload {
             return None;
         }
-        let known = self.equivocations.iter().rposition(|p| p.b.signature == v.signature);
+        let known = self.equivocations.iter().rposition(|p| p.b.payload == v.payload);
         let proof = match known {
             Some(at) => &mut self.equivocations[at],
             None if self.equivocations.len() < MAX_PROOFS => {

@@ -104,6 +104,7 @@ impl Bonds {
             Some(Lock::Bonded {
                 owner, unbonding_since, ..
             }) if *owner == env::predecessor_account_id() => *unbonding_since = Some(env::block_timestamp()),
+            Some(Lock::Withdrawing { .. }) => env::panic_str("withdrawing"),
             _ => env::panic_str("not your bond"),
         }
     }
@@ -111,20 +112,20 @@ impl Bonds {
     /// Returns `account`'s bond to its owner once the unbonding delay has passed. The lock is
     /// marked first, so the bond cannot be withdrawn twice, and put back if the transfer fails.
     pub fn withdraw(&mut self, account: AccountId) -> Promise {
-        let Some(Lock::Bonded {
-            amount,
-            owner,
-            unbonding_since: Some(since),
-        }) = self.locks.get(&account)
-        else {
-            env::panic_str("unbond first")
+        let (amount, owner, since) = match self.locks.get(&account) {
+            Some(Lock::Bonded {
+                amount,
+                owner,
+                unbonding_since: Some(since),
+            }) => (*amount, owner.clone(), *since),
+            Some(Lock::Withdrawing { .. }) => env::panic_str("withdrawing"),
+            _ => env::panic_str("unbond first"),
         };
-        require!(*owner == env::predecessor_account_id(), "not your bond");
+        require!(owner == env::predecessor_account_id(), "not your bond");
         require!(
             env::block_timestamp() >= since.saturating_add(UNBONDING_NS),
             "still unbonding"
         );
-        let (amount, owner, since) = (*amount, owner.clone(), *since);
         self.locks.insert(
             account.clone(),
             Lock::Withdrawing {
@@ -429,6 +430,17 @@ mod tests {
         callback();
         c.withdrawn(me.clone(), Ok(()));
         assert!(c.at_stake(me).is_zero());
+    }
+
+    // A wallet that retries a withdrawal after a timeout, before the callback ran, is told what is
+    // going on rather than "unbond first" about a bond it has already unbonded.
+    #[test]
+    #[should_panic(expected = "withdrawing")]
+    fn a_bond_on_its_way_out_cannot_be_withdrawn_twice() {
+        let (k, mut c) = unbonding(NEAR);
+        call("wallet.near", 0, 1_000 + UNBONDING_NS);
+        let _ = c.withdraw(account(&k));
+        let _ = c.withdraw(account(&k));
     }
 
     // While the transfer runs the slot is neither free nor a bond: a stranger bonding it then

@@ -548,10 +548,11 @@ async fn a_pair_goes_to_the_bond_contract_and_the_slashing_transaction_is_publis
     assert_eq!(settler.equivocations().await[0].tx.as_deref(), Some("slash1"));
 }
 
-// The relayer could not reach the chain; nothing is known. The pair must not be lost, and the
-// next gateway to carry the voucher gives it another go.
-#[tokio::test]
-async fn a_slashing_lost_to_an_outage_is_sent_again_with_the_next_upload() {
+// The relayer could not reach the chain; nothing is known. The pair must not be lost: once the
+// in-flight time is up (the transaction may have gone out), a gateway carrying the voucher gives it
+// another go.
+#[tokio::test(start_paused = true)]
+async fn a_slashing_lost_to_an_outage_is_sent_again_once_the_in_flight_time_is_up() {
     let chain = FakeChain::new();
     let settler = Settler::new(chain.clone());
     let (first, second) = pair();
@@ -562,6 +563,10 @@ async fn a_slashing_lost_to_an_outage_is_sent_again_with_the_next_upload() {
     let proof = &settler.equivocations().await[0];
     assert_eq!((proof.tx.as_deref(), proof.refusal.as_deref()), (None, None));
     chain.state().down = false;
+    settle(&settler, &[&second]).await;
+    settle_down().await;
+    assert!(chain.state().slashed.is_empty(), "not before the first may have landed");
+    tokio::time::advance(std::time::Duration::from_secs(120)).await;
     settle(&settler, &[&second]).await;
     settle_down().await;
     assert_eq!(settler.equivocations().await[0].tx.as_deref(), Some("slash1"));
@@ -654,7 +659,7 @@ async fn an_attempt_given_up_on_does_not_speak_for_the_pair_when_it_comes_back()
 
 // The slashing landed but its answer was lost. Sending it again would burn gas on a transaction the
 // contract must refuse, and record that refusal as if the key had never been slashed.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_slashing_whose_answer_was_lost_is_recognised_rather_than_sent_again() {
     let chain = FakeChain::new();
     chain.state().no_answer_to_slashing = true;
@@ -663,6 +668,7 @@ async fn a_slashing_whose_answer_was_lost_is_recognised_rather_than_sent_again()
     settle(&settler, &[&first, &second]).await;
     settle_down().await;
     chain.state().no_answer_to_slashing = false;
+    tokio::time::advance(std::time::Duration::from_secs(120)).await;
     settle(&settler, &[&second]).await;
     settle_down().await;
     let proof = &settler.equivocations().await[0];
