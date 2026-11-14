@@ -14,6 +14,7 @@ relayer/demo.env
 # Keys, and signed vouchers: anyone holding one can submit it
 relayer/voucher.json
 *.key
+keys/
 # Android release signing
 app/android/key.properties
 *.jks

@@ -190,6 +190,41 @@ void main() {
     expect((await stored(v)).outcome, isNull);
   });
 
+  // What the user sees in airplane mode. With nothing to upload an attempt makes no request, so
+  // without this the phone goes on saying it is online; and once the signal is back, a payment
+  // waiting on the phone must not sit there until the next half minute.
+  test('a phone with nothing to upload still notices the signal going, and settles the moment it is back', () async {
+    var signal = true;
+    final changes = <String?>[];
+    late final Gateway phone;
+    phone = Gateway(store, 'https://relayer.test', client: MockClient((request) async {
+      if (!signal) throw http.ClientException('Failed host lookup');
+      if (request.url.path == '/healthz') return http.Response('{"ok":true}', 200);
+      final vouchers = jsonDecode(request.body)['vouchers'] as List;
+      uploads.add(vouchers);
+      return http.Response(
+          jsonEncode({'results': vouchers.map((_) => {'status': 'settled', 'tx': 'tx1', 'block': 5000}).toList()}), 200);
+    }), onChange: () => changes.add(phone.problem));
+
+    await phone.checkSignal(); // online, nothing to upload: the first attempt goes through
+    expect(phone.problem, isNull);
+
+    signal = false;
+    await phone.checkSignal();
+    expect(phone.problem, 'No signal');
+    expect(changes.last, 'No signal', reason: 'the screen is told, not left showing Online');
+
+    final paid = await voucher();
+    await store.put(paid, VoucherKind.received); // taken offline
+    signal = true;
+    await phone.checkSignal();
+    expect(phone.problem, isNull);
+    expect(uploads, [
+      [paid]
+    ]);
+    expect((await stored(paid)).outcome, Outcome.settled);
+  });
+
   // The demo's "C turns on data and the voucher settles": nobody presses anything.
   test('once started, a voucher that arrives while online is uploaded right away', () async {
     final first = Completer<void>(), second = Completer<void>();
@@ -248,6 +283,45 @@ void main() {
       await attempt();
       expect(fetched, ['https://relayer.test/attestation/$account']);
       expect((await attestationFor(mine, account))!.balance, BigInt.from(5000000));
+    });
+
+    // The merchant watching the screen: the money has arrived on chain, and a balance that still
+    // shows the old figure for ten minutes reads as "it did not work".
+    test('is fetched again the moment a payment settles, however fresh the one held', () async {
+      final relayer = await Ed25519().newKeyPair();
+      relayerKey = await publicKeyOf(relayer);
+      var balance = '5000000';
+      final attempts = StreamController<void>.broadcast();
+      final g = Gateway(mine, 'https://relayer.test',
+          account: account,
+          onChange: () => attempts.add(null),
+          client: MockClient((request) async {
+            if (request.url.path == '/healthz') return http.Response('{"ok":true}', 200);
+            if (request.method == 'POST') {
+              final vouchers = jsonDecode(request.body)['vouchers'] as List;
+              if (vouchers.isNotEmpty) balance = '7500000'; // settling is what moves it
+              return http.Response(
+                  jsonEncode({'results': vouchers.map((_) => {'status': 'settled', 'tx': 'tx1', 'block': 5000}).toList()}),
+                  200);
+            }
+            fetched.add(request.url.toString());
+            return http.Response(jsonEncode(await signAttestation(relayer, account, balance, block: 5001)), 200);
+          }));
+      addTearDown(g.stop);
+
+      final first = attempts.stream.first;
+      g.start(); // nothing to settle yet: the first attestation
+      await first.timeout(const Duration(seconds: 5));
+      expect((await attestationFor(mine, account))!.balance, BigInt.from(5000000));
+
+      final second = attempts.stream.first;
+      await mine.put(
+          await signVoucher(await Ed25519().newKeyPair(), [Transfer(account, {usdcToken: '2500000'})],
+              DateTime.now().add(const Duration(hours: 72)), makeNonce()),
+          VoucherKind.received);
+      await second.timeout(const Duration(seconds: 5));
+      expect(fetched.length, 2, reason: 'the one held is seconds old, and is replaced all the same');
+      expect((await attestationFor(mine, account))!.balance, BigInt.from(7500000));
     });
 
     test('signed by a key this build does not trust is reported, not quietly dropped', () async {

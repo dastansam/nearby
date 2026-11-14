@@ -85,9 +85,9 @@ Tests: `cargo test` at the root (relayer and voucher), `cargo test -p nearby-bon
 
 Hackathon build for NEAR Hackathon (submissions close 2026-11-14 23:59 UTC). Mainnet only: Intents has no testnet deployment. The author is also part of [ainek](https://github.com/sadabaevb/ainek), another project in the same hackathon.
 
-Run on mainnet on 2026-11-14, through the relayer, with throwaway keys: a 0.10 USDC voucher [settled](https://nearblocks.io/txns/CAF2mqAyH4t6WHX5h1qtDQrvvwhbwkQtAyQGYEz15GhQ) on `intents.near`, and a double-spend made with `settle-test cheat` was [slashed](https://nearblocks.io/txns/7mmL3JL7cRwQyQVv3cPQuxMHnFmtcZrTM445iSkX5uQb) by the bond contract, which banned the key and took its 1 NEAR bond. The voucher was uploaded seconds after it was signed, not a day later, and it was signed by the test tool, not by a phone.
+Run on mainnet on 2026-11-14, through the relayer, with throwaway keys: a 0.10 USDC voucher [settled](https://nearblocks.io/txns/CAF2mqAyH4t6WHX5h1qtDQrvvwhbwkQtAyQGYEz15GhQ) on `intents.near`, and a double-spend made with `settle-test cheat` was [slashed](https://nearblocks.io/txns/7mmL3JL7cRwQyQVv3cPQuxMHnFmtcZrTM445iSkX5uQb) by the bond contract, which banned the key and took its 1 NEAR bond. That voucher was signed by the test tool and uploaded seconds later. The same day two iPhones paid each other by QR code, once in each direction: each voucher was signed with no relayer in reach, uploaded 35 and 21 seconds later when a phone had its signal back, and settled ([one](https://nearblocks.io/txns/9xRH29n2pZmnTvLyX71FGpVqXbsSNysReBYMi615bz7n), [the other](https://nearblocks.io/txns/5GuouwTLSrwsu466YwsELrbFdJcsPyyBEkwL4AoVsHRm)). That build asks for a 1 NEAR bond (`MIN_BOND_NEAR=1`), not 5.
 
-Not yet proven: the phone-to-phone relay has only run in tests, not on phones.
+Not yet proven: the radio relay between phones has only run in tests, not on phones, and no voucher has been held for a day before settling.
 
 The relay is per platform: iPhones find iPhones, Android phones find Android phones, and the two never find each other. Everything else, including the QR path, works across the two.
 

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
 import '../store.dart';
+import '../theme.dart';
 import '../voucher/attestation.dart';
 import '../voucher/guards.dart';
 import '../voucher/nep413.dart';
@@ -70,14 +71,31 @@ class VoucherScreen extends StatelessWidget {
   const VoucherScreen({super.key, required this.voucher, required this.handoff});
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: const Text('Show this to the payee')),
-        body: Center(
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    // As large as the screen allows: the code carries the voucher and the attestation, and is dense.
+    final side = (MediaQuery.sizeOf(context).width - 44).clamp(200.0, 340.0);
+    return Scaffold(
+      appBar: AppBar(title: const Text('Show this to the payee')),
+      body: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Text(formatUsdc(amountOf(voucher)), style: Theme.of(context).textTheme.headlineMedium),
-            const SizedBox(height: 16),
-            QrImageView(data: handoff, size: 340, backgroundColor: Colors.white),
+            Text('YOU PAY', style: labelStyle(context)),
+            const SizedBox(height: 8),
+            Amount(formatUsdc(amountOf(voucher)), size: 52),
+            const SizedBox(height: 20),
+            Panel(
+              color: Colors.white,
+              padding: const EdgeInsets.all(10),
+              child: QrImageView(data: handoff, size: side, backgroundColor: Colors.white),
+            ),
+            const SizedBox(height: 18),
+            Text('Signed on this phone. It settles when a phone that holds it has a signal.',
+                textAlign: TextAlign.center, style: TextStyle(fontSize: 14, color: scheme.onSurfaceVariant)),
           ]),
         ),
-      );
+      ),
+    );
+  }
 }

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
 import '../store.dart';
+import '../theme.dart';
 import '../voucher/attestation.dart';
 import '../voucher/guards.dart';
 import '../voucher/nep413.dart';
@@ -144,30 +145,65 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     final request = _request;
     final theme = Theme.of(context);
     final refused = _outcome == Outcome.failed || (_outcome == null && _rejectedFor != null);
+    final scheme = theme.colorScheme;
+    final small = TextStyle(fontSize: 14, height: 1.35, color: scheme.onSurfaceVariant);
     return Scaffold(
       appBar: AppBar(title: const Text('Receive')),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: request == null
-            ? Column(children: [
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
+        children: request == null
+            ? [
+                const SizedBox(height: 28),
+                Text('AMOUNT', textAlign: TextAlign.center, style: labelStyle(context)),
                 TextField(
                   controller: _amount,
                   autofocus: true,
+                  textAlign: TextAlign.center,
                   keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                  decoration: const InputDecoration(labelText: 'Amount', suffixText: 'USDC'),
+                  cursorColor: scheme.primary,
+                  style: TextStyle(
+                      fontSize: 64, fontWeight: FontWeight.w700, letterSpacing: -2, color: scheme.onSurface, fontFeatures: figures),
+                  decoration: InputDecoration(
+                    border: InputBorder.none,
+                    hintText: '0.00',
+                    hintStyle: TextStyle(color: scheme.outlineVariant),
+                  ),
                 ),
-                const SizedBox(height: 16),
+                Text('USDC',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, letterSpacing: 0.6, color: scheme.onSurfaceVariant)),
+                const SizedBox(height: 32),
                 FilledButton(onPressed: _showRequest, child: const Text('Show QR')),
-              ])
-            : Column(children: [
-                Text(formatUsdc(request.amount), style: theme.textTheme.headlineMedium),
-                const SizedBox(height: 16),
+                const SizedBox(height: 14),
+                Text('Up to ${formatUsdc(paymentCap.toString())} per offline payment.', textAlign: TextAlign.center, style: small),
+              ]
+            : [
+                const SizedBox(height: 8),
+                Text(_paid ? 'RECEIVED' : 'REQUEST', textAlign: TextAlign.center, style: labelStyle(context)),
+                const SizedBox(height: 8),
+                Amount(formatUsdc(request.amount), size: 52),
+                const SizedBox(height: 20),
                 if (_paid)
-                  Icon(refused ? Icons.error : Icons.check_circle,
-                      size: 160, color: refused ? theme.colorScheme.error : theme.colorScheme.primary)
+                  Center(
+                    child: Container(
+                      width: 168,
+                      height: 168,
+                      decoration: BoxDecoration(
+                          color: (refused ? scheme.error : scheme.primary).withValues(alpha: 0.12), shape: BoxShape.circle),
+                      child: Icon(refused ? Icons.priority_high_rounded : Icons.check_rounded,
+                          size: 96, color: refused ? scheme.error : scheme.primary),
+                    ),
+                  )
                 else
-                  QrImageView(key: ValueKey(request.encode()), data: request.encode(), size: 260, backgroundColor: Colors.white),
-                const SizedBox(height: 16),
+                  Center(
+                    child: Panel(
+                      color: Colors.white,
+                      padding: const EdgeInsets.all(12),
+                      child: QrImageView(
+                          key: ValueKey(request.encode()), data: request.encode(), size: 260, backgroundColor: Colors.white),
+                    ),
+                  ),
+                const SizedBox(height: 20),
                 if (_paid) ...[
                   Text(
                       switch (_outcome) {
@@ -175,35 +211,45 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                         Outcome.failed => 'Paid, but the chain refused it',
                         null => _rejectedFor == null ? 'Paid, pending settlement' : 'Paid, but the chain turns it down for now',
                       },
-                      style: theme.textTheme.titleLarge?.copyWith(color: refused ? theme.colorScheme.error : null)),
+                      textAlign: TextAlign.center,
+                      style: theme.textTheme.titleLarge
+                          ?.copyWith(fontWeight: FontWeight.w700, color: refused ? scheme.error : scheme.onSurface)),
+                  const SizedBox(height: 8),
                   if (_outcome == Outcome.failed)
-                    const Text('The voucher is signed but intents.near will not pay it: do not hand over the goods.',
-                        textAlign: TextAlign.center)
+                    Text('The voucher is signed but intents.near will not pay it: do not hand over the goods.',
+                        textAlign: TextAlign.center, style: small)
                   else if (refused)
                     Text('intents.near says: $_rejectedFor. It settles only if that changes, so do not count on it.',
-                        textAlign: TextAlign.center),
+                        textAlign: TextAlign.center, style: small)
+                  else if (_outcome == null)
+                    Text('Checked on this phone. It settles once a phone that holds it has a signal.',
+                        textAlign: TextAlign.center, style: small),
                   // Said out loud: without a relayer key this build cannot tell a funded payer from an empty one.
                   if (relayerKey.isEmpty && _outcome == null)
-                    const Text('The payer\'s balance was not checked: this build trusts no relayer'),
+                    Text('The payer\'s balance was not checked: this build trusts no relayer',
+                        textAlign: TextAlign.center, style: small),
                 ]
                 else if (_rejection != null) ...[
                   Text('Rejected: ${guardRefusals[_rejection] ?? _rejection}',
                       textAlign: TextAlign.center,
-                      style: theme.textTheme.titleLarge?.copyWith(color: theme.colorScheme.error)),
+                      style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700, color: scheme.error)),
+                  const SizedBox(height: 8),
                   // Refusing cannot unsign the voucher: it pays this request and may still reach the chain.
                   if (guardRefusals.containsKey(_rejection))
-                    const Text('The payment is validly signed. If it settles anyway, the money still reaches you.',
-                        textAlign: TextAlign.center),
-                ],
+                    Text('The payment is validly signed. If it settles anyway, the money still reaches you.',
+                        textAlign: TextAlign.center, style: small),
+                ]
+                else
+                  Text('The payer scans this code, then shows you theirs.', textAlign: TextAlign.center, style: small),
                 if (!_paid) ...[
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 20),
                   FilledButton.icon(
                     onPressed: _scanVoucher,
                     icon: const Icon(Icons.qr_code_scanner),
                     label: const Text('Scan the voucher'),
                   ),
                 ],
-              ]),
+              ],
       ),
     );
   }

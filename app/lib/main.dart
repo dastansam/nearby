@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'gateway.dart';
 import 'mesh/gossip.dart';
@@ -12,6 +13,7 @@ import 'mesh/transport.dart';
 import 'screens/pay.dart';
 import 'screens/receive.dart';
 import 'store.dart';
+import 'theme.dart';
 import 'voucher/attestation.dart';
 import 'voucher/guards.dart';
 import 'voucher/payment.dart';
@@ -25,7 +27,8 @@ class NearByApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) => MaterialApp(
         title: 'NearBy',
-        theme: ThemeData(colorSchemeSeed: Colors.teal, useMaterial3: true),
+        theme: nearbyTheme(Brightness.light),
+        darkTheme: nearbyTheme(Brightness.dark),
         home: const HomeScreen(),
       );
 }
@@ -137,10 +140,21 @@ class _HomeScreenState extends State<HomeScreen> {
     await _reloadVouchers();
   }
 
-  Future<void> _copyTx(String tx) async {
+  Future<void> _copy(String text, String said) async {
     final messenger = ScaffoldMessenger.of(context);
-    await Clipboard.setData(ClipboardData(text: 'https://nearblocks.io/txns/$tx'));
-    messenger.showSnackBar(const SnackBar(content: Text('Transaction link copied')));
+    await Clipboard.setData(ClipboardData(text: text));
+    messenger.showSnackBar(SnackBar(content: Text(said)));
+  }
+
+  /// Shows a settled payment's transaction on the explorer, inside the app.
+  Future<void> _openTx(String tx) async {
+    final link = 'https://nearblocks.io/txns/$tx';
+    try {
+      if (await launchUrl(Uri.parse(link), mode: LaunchMode.inAppBrowserView)) return;
+    } catch (_) {
+      // No browser to hand it to: the link is still worth having.
+    }
+    await _copy(link, 'Could not open the explorer. Link copied.');
   }
 
   Future<void> _reloadVouchers() async {
@@ -176,88 +190,224 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
       );
     }
-    return Scaffold(
-      appBar: AppBar(title: const Text('NearBy')),
-      body: Column(children: [
-        ListTile(
-          title: const Text('Offline account'),
-          subtitle: SelectableText(wallet.accountId),
-        ),
-        if (relayerKey.isNotEmpty)
-          ListTile(
-            leading: const Icon(Icons.account_balance_wallet_outlined),
-            title: Text(_attested == null
-                ? 'Offline balance unknown'
-                : isStale(_attested!, DateTime.now())
-                    ? 'Offline balance out of date'
-                    : 'Offline balance: ${formatUsdc(_budget.toString())}'),
-            subtitle: Text(_attested == null
-                ? 'Go online once to load it. Payees accept payments only against it.'
-                : 'As of ${TimeOfDay.fromDateTime(_attested!.asOf.toLocal()).format(context)} · tap to refresh'),
-            onTap: _refreshBalance,
-          ),
-        ListTile(
-          leading: const Icon(Icons.hub_outlined),
-          title: Text(_gossip == null ? 'Mesh off' : '${_gossip!.peerCount} phones connected'),
-          subtitle: Text(_gossip == null
-              ? (_meshError == null ? 'Starting' : 'QR payments still work. $_meshError')
-              : 'Carrying $_carried payments toward the internet'),
-        ),
-        ListTile(
-          leading: const Icon(Icons.cloud_outlined),
-          title: Text(_gateway == null
-              ? 'No relayer in this build'
-              : _gateway!.problem ?? 'Online: settling payments'),
-          subtitle: Text(_gateway == null
-              ? 'Payments are signed and relayed, and settle from a phone that has one'
-              : '$_waiting payments waiting to settle'),
-        ),
-        Padding(
-          padding: const EdgeInsets.all(16),
-          child: Row(children: [
-            Expanded(
-              child: FilledButton(
-                onPressed: () => _flow(() => pay(context, wallet, _store)),
-                child: const Text('Pay'),
+    final scheme = Theme.of(context).colorScheme;
+    final gateway = _gateway, attested = _attested;
+    final online = gateway != null && gateway.problem == null;
+    final stale = attested != null && isStale(attested, DateTime.now());
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      // No app bar here to do it: keep the clock and the airplane icon readable on either background.
+      value: scheme.brightness == Brightness.dark ? SystemUiOverlayStyle.light : SystemUiOverlayStyle.dark,
+      child: Scaffold(
+        body: SafeArea(
+          child: ListView(padding: const EdgeInsets.fromLTRB(20, 14, 20, 28), children: [
+            Row(children: [
+              Text('NearBy',
+                  style: TextStyle(fontSize: 28, fontWeight: FontWeight.w800, letterSpacing: -1, color: scheme.onSurface)),
+              const Spacer(),
+              if (gateway != null) _Pill(online ? 'Online' : 'Offline', online ? scheme.primary : scheme.secondary),
+            ]),
+            const SizedBox(height: 18),
+            if (relayerKey.isNotEmpty) ...[
+              Panel(
+                color: scheme.primaryContainer,
+                padding: const EdgeInsets.fromLTRB(22, 20, 22, 22),
+                onTap: _refreshBalance,
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Row(children: [
+                    Text('OFFLINE BALANCE',
+                        style: labelStyle(context, color: scheme.onPrimaryContainer.withValues(alpha: 0.72))),
+                    const Spacer(),
+                    Icon(Icons.refresh, size: 18, color: scheme.onPrimaryContainer.withValues(alpha: 0.72)),
+                  ]),
+                  const SizedBox(height: 14),
+                  Amount(attested == null || stale ? '—' : formatUsdc(_budget.toString()),
+                      size: 60, color: scheme.onPrimaryContainer),
+                  const SizedBox(height: 12),
+                  Text(
+                    attested == null
+                        ? 'Go online once to load it. Payees accept payments only against it.'
+                        : stale
+                            ? 'Out of date. Go online, then tap to refresh.'
+                            : 'As of ${TimeOfDay.fromDateTime(attested.asOf.toLocal()).format(context)} · tap to refresh',
+                    style: TextStyle(fontSize: 14, color: scheme.onPrimaryContainer.withValues(alpha: 0.8)),
+                  ),
+                ]),
               ),
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: FilledButton.tonal(
-                onPressed: () => _flow(() => Navigator.push(context,
-                    MaterialPageRoute(builder: (_) => ReceiveScreen(accountId: wallet.accountId, store: _store)))),
-                child: const Text('Receive'),
+              const SizedBox(height: 12),
+            ],
+            Row(children: [
+              Expanded(
+                child: FilledButton.icon(
+                  onPressed: () => _flow(() => pay(context, wallet, _store)),
+                  icon: const Icon(Icons.north_east, size: 20),
+                  label: const Text('Pay'),
+                ),
               ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: () => _flow(() => Navigator.push(context,
+                      MaterialPageRoute(builder: (_) => ReceiveScreen(accountId: wallet.accountId, store: _store)))),
+                  icon: const Icon(Icons.south_west, size: 20),
+                  label: const Text('Receive'),
+                ),
+              ),
+            ]),
+            const SizedBox(height: 12),
+            Panel(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: Column(children: [
+                _Fact(
+                  icon: Icons.key_outlined,
+                  title: 'Offline account',
+                  detail: '${wallet.accountId.substring(0, 10)}…${wallet.accountId.substring(wallet.accountId.length - 8)}',
+                  mono: true,
+                  trailing: Icons.copy_outlined,
+                  onTap: () => _copy(wallet.accountId, 'Account copied'),
+                ),
+                Divider(height: 1, indent: 54, color: scheme.outlineVariant),
+                _Fact(
+                  icon: Icons.hub_outlined,
+                  title: _gossip == null ? 'Mesh off' : '${_gossip!.peerCount} phones connected',
+                  detail: _gossip == null
+                      ? (_meshError == null ? 'Starting' : 'QR payments still work. $_meshError')
+                      : 'Carrying $_carried payments toward the internet',
+                ),
+                Divider(height: 1, indent: 54, color: scheme.outlineVariant),
+                _Fact(
+                  icon: Icons.cloud_outlined,
+                  title: gateway == null ? 'No relayer in this build' : gateway.problem ?? 'Online: settling payments',
+                  detail: gateway == null
+                      ? 'Payments are signed and relayed, and settle from a phone that has one'
+                      : '$_waiting payments waiting to settle',
+                ),
+              ]),
             ),
+            const SizedBox(height: 28),
+            Padding(
+              padding: const EdgeInsets.only(left: 4, bottom: 6),
+              child: Text('ACTIVITY', style: labelStyle(context)),
+            ),
+            if (_vouchers.isEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(4, 14, 4, 0),
+                child: Text('No payments yet. Pay or receive one; it works with no signal.',
+                    style: TextStyle(fontSize: 15, color: scheme.onSurfaceVariant)),
+              ),
+            for (final v in _vouchers) _payment(v),
           ]),
         ),
-        Expanded(
-          child: ListView.builder(
-            itemCount: _vouchers.length,
-            itemBuilder: (context, i) {
-              final v = _vouchers[i];
-              final sent = v.kind == VoucherKind.sent, pending = canSettle(v, DateTime.now());
-              return ListTile(
-                leading: Icon(sent ? Icons.arrow_upward : Icons.arrow_downward),
-                title: Text('${sent ? 'Sent' : 'Received'} ${formatUsdc(amountOf(v.voucher))}'),
-                subtitle: Text(switch (v.outcome) {
-                  Outcome.settled => v.tx == null ? 'Settled' : 'Settled · tap to copy the transaction link',
+      ),
+    );
+  }
+
+  Widget _payment(StoredVoucher v) {
+    final scheme = Theme.of(context).colorScheme;
+    final sent = v.kind == VoucherKind.sent, pending = canSettle(v, DateTime.now());
+    final figure = formatUsdc(amountOf(v.voucher)).replaceFirst(' USDC', '');
+    final tone = switch (v.outcome) {
+      Outcome.settled => scheme.primary,
+      Outcome.failed => scheme.error,
+      null => pending ? scheme.secondary : scheme.onSurfaceVariant,
+    };
+    return InkWell(
+      borderRadius: BorderRadius.circular(16),
+      onTap: v.tx != null
+          ? () => _openTx(v.tx!)
+          // Re-showing beats re-signing: a second voucher for one purchase would settle twice.
+          : sent && pending
+              ? () => showVoucher(context, _store, v.voucher)
+              : null,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 12),
+        child: Row(children: [
+          Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(color: tone.withValues(alpha: 0.14), shape: BoxShape.circle),
+            child: Icon(sent ? Icons.north_east : Icons.south_west, size: 20, color: tone),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(sent ? 'Sent' : 'Received',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: scheme.onSurface)),
+              const SizedBox(height: 2),
+              Text(
+                switch (v.outcome) {
+                  Outcome.settled => v.tx == null ? 'Settled' : 'Settled · tap to see it on the explorer',
                   Outcome.failed => 'Did not settle',
                   // Another phone may have settled it in time; only the relayer can say.
                   null when !pending => 'Expired · not known to have settled',
                   null => sent ? 'Pending settlement · tap to show the QR again' : 'Pending settlement',
-                }),
-                onTap: v.tx != null
-                    ? () => _copyTx(v.tx!)
-                    // Re-showing beats re-signing: a second voucher for one purchase would settle twice.
-                    : sent && pending
-                        ? () => showVoucher(context, _store, v.voucher)
-                        : null,
-              );
-            },
+                },
+                style: TextStyle(fontSize: 13, color: v.outcome == null ? scheme.onSurfaceVariant : tone),
+              ),
+            ]),
           ),
-        ),
-      ]),
+          const SizedBox(width: 12),
+          Text('${sent ? '−' : '+'}$figure',
+              style: TextStyle(
+                  fontSize: 17, fontWeight: FontWeight.w700, fontFeatures: figures, color: scheme.onSurface)),
+        ]),
+      ),
+    );
+  }
+}
+
+/// A word with a dot: whether this phone can reach the relayer right now.
+class _Pill extends StatelessWidget {
+  final String text;
+  final Color color;
+  const _Pill(this.text, this.color);
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        decoration: BoxDecoration(color: color.withValues(alpha: 0.14), borderRadius: BorderRadius.circular(99)),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Container(width: 8, height: 8, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+          const SizedBox(width: 7),
+          Text(text, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: color)),
+        ]),
+      );
+}
+
+/// One line of the status sheet.
+class _Fact extends StatelessWidget {
+  final IconData icon;
+  final String title, detail;
+  final bool mono;
+  final IconData? trailing;
+  final VoidCallback? onTap;
+  const _Fact(
+      {required this.icon, required this.title, required this.detail, this.mono = false, this.trailing, this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+        child: Row(children: [
+          Icon(icon, size: 22, color: scheme.onSurfaceVariant),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(title, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: scheme.onSurface)),
+              const SizedBox(height: 2),
+              Text(detail,
+                  style: TextStyle(
+                      fontSize: 13,
+                      color: scheme.onSurfaceVariant,
+                      fontFamily: mono ? 'Menlo' : null,
+                      fontFamilyFallback: mono ? const ['monospace'] : null)),
+            ]),
+          ),
+          if (trailing != null) Icon(trailing, size: 18, color: scheme.onSurfaceVariant),
+        ]),
+      ),
     );
   }
 }

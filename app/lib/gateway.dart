@@ -34,9 +34,10 @@ class Gateway {
   final void Function()? onChange;
 
   /// Why the last attempt did not go through, for the user to read; null when it did.
-  String? problem = 'No signal';
+  String? problem = _noSignal;
+  static const _noSignal = 'No signal';
 
-  Timer? _timer;
+  Timer? _timer, _pulse;
   StreamSubscription<void>? _puts;
   bool _busy = false, _again = false;
 
@@ -44,12 +45,32 @@ class Gateway {
   /// a signal settles for everyone, and no phone knows in advance that it will be the one.
   void start() {
     _timer = Timer.periodic(const Duration(seconds: 30), (_) => _attempt());
+    _pulse = Timer.periodic(const Duration(seconds: 4), (_) => checkSignal());
     _puts = _store.puts.listen((_) => _attempt());
     _attempt();
   }
 
+  /// Asks the relayer the cheapest question there is. An attempt with nothing to upload makes no
+  /// request, so it cannot tell that the signal has gone; and a phone that has just got it back
+  /// should settle now, not at the next half minute.
+  Future<void> checkSignal() async {
+    if (_busy) return; // an attempt is talking to the relayer and will say how it went
+    bool reached;
+    try {
+      reached = (await _client.get(Uri.parse('$_base/healthz')).timeout(const Duration(seconds: 3))).statusCode == 200;
+    } catch (_) {
+      reached = false;
+    }
+    if (reached && problem == _noSignal) return _attempt();
+    if (!reached && problem == null) {
+      problem = _noSignal;
+      onChange?.call();
+    }
+  }
+
   Future<void> stop() async {
     _timer?.cancel();
+    _pulse?.cancel();
     await _puts?.cancel();
   }
 
@@ -64,13 +85,13 @@ class Gateway {
     do {
       _again = false;
       try {
-        await sync();
-        await _refreshAttestationIfOld();
+        // A settlement has just moved someone's balance, likely this phone's: show the new one now.
+        await _refreshAttestationIfOld(now: await sync());
         problem = null;
       } on http.ClientException {
-        problem = 'No signal'; // the usual case, and the reason the mesh exists
+        problem = _noSignal; // the usual case, and the reason the mesh exists
       } on TimeoutException {
-        problem = 'No signal';
+        problem = _noSignal;
       } catch (e) {
         // A wrong relayer address or a relayer fault would otherwise look like a phone with no signal.
         problem = 'Relayer problem: $e';
@@ -86,8 +107,10 @@ class Gateway {
   /// Expired ones are asked about too: another phone may have settled them in time. So are settled
   /// ones whose block is not known yet: until it is, they count against the payer's balance.
   ///
-  /// Throws if the relayer cannot be reached, which is the normal state of a phone with no signal.
-  Future<void> sync() async {
+  /// Says whether the relayer reported anything settled. Throws if the relayer cannot be reached,
+  /// which is the normal state of a phone with no signal.
+  Future<bool> sync() async {
+    var settled = false;
     final pending = [
       for (final s in await _store.all())
         if (s.outcome == null || (s.outcome == Outcome.settled && s.settledBlock == null)) s.voucher
@@ -108,6 +131,7 @@ class Gateway {
           if (result['status'] == 'rejected') _store.noteRejection(batch[j], result['reason'] as String? ?? 'rejected');
           continue;
         }
+        settled |= outcome == Outcome.settled;
         // A settled result may carry the relayer's signed receipt, for phones with no signal that
         // still carry the voucher. They check it against the key this build pins, so one that fails
         // here would only be refused by every peer: record the answer without it, and say so (not
@@ -120,6 +144,7 @@ class Gateway {
         await _store.setOutcome(batch[j], outcome, tx: result['tx'] as String?, block: result['block'] as int?);
       }
     }
+    return settled;
   }
 
   /// Fetches a new balance attestation for [account]: what payees will accept this phone's
@@ -134,10 +159,10 @@ class Gateway {
   }
 
   /// Often enough that a phone leaving coverage has most of the 24 h left; not on every upload.
-  Future<void> _refreshAttestationIfOld() async {
+  Future<void> _refreshAttestationIfOld({bool now = false}) async {
     if (account == null || relayerKey.isEmpty) return; // nothing this build could verify or use
     final held = await attestationFor(_store, account!);
-    if (held == null || held.asOf.isBefore(DateTime.now().subtract(const Duration(minutes: 10)))) {
+    if (now || held == null || held.asOf.isBefore(DateTime.now().subtract(const Duration(minutes: 10)))) {
       await refreshAttestation();
     }
   }
