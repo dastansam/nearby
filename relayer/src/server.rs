@@ -2,6 +2,7 @@
 //! signature, balances are public, and an attestation is only as good as the relayer's signature on it.
 use crate::attestation::{sign_attestation, sign_receipt, Attestation, Receipt};
 use crate::chain::Chain;
+use crate::log;
 use crate::settle::{Outcome, Proof, Settler};
 use crate::voucher::{iso, tag, USDC_TOKEN};
 use axum::extract::rejection::JsonRejection;
@@ -27,14 +28,26 @@ struct Relayer<C> {
 }
 
 pub fn router<C: Chain>(chain: Arc<C>, attestation_key: SigningKey, now: fn() -> DateTime<Utc>) -> Router {
+    router_with(Settler::new(chain.clone()), chain, attestation_key, now)
+}
+
+/// Like [`router`], with a settler of the caller's making (one that keeps a journal, say). The
+/// caller starts its sweep ([`Settler::keep_sweeping`]), or double-spends are only retried on a restart.
+pub fn router_with<C: Chain>(
+    settler: Settler<C>,
+    chain: Arc<C>,
+    attestation_key: SigningKey,
+    now: fn() -> DateTime<Utc>,
+) -> Router {
     let relayer = Relayer {
-        settler: Settler::new(chain.clone()),
+        settler,
         chain,
         attestation_key,
         now,
     };
     Router::new()
         .route("/", get(about::<C>))
+        .route("/healthz", get(|| async { Json(json!({ "ok": true })) }))
         .route("/vouchers", post(upload::<C>))
         .route("/attestation/{account}", get(attest::<C>))
         .route("/equivocations", get(equivocations::<C>))
@@ -65,6 +78,7 @@ async fn upload<C: Chain>(
 ) -> Response {
     match body {
         Ok(Json(Upload { vouchers })) if vouchers.len() <= MAX_VOUCHERS => {
+            log(format!("upload of {} vouchers", vouchers.len()));
             // In a task of its own: a phone that loses its signal mid-upload drops this request, and
             // that must not stop a settlement halfway, with a transaction sent and nothing recorded.
             let settling = tokio::spawn(async move {

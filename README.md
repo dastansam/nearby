@@ -39,6 +39,19 @@ RELAYER_ACCOUNT=you.near RELAYER_KEY=ed25519:... ATTESTATION_SK=<64 hex chars> B
 
 `RELAYER_ACCOUNT` is a mainnet account with NEAR for gas. It only pays gas: a voucher's own signature moves the tokens, and the bond contract decides a slashing. Each pair of equivocating vouchers goes to `slash` once there is something at stake, and `GET /equivocations` lists the pairs with the slashing transaction or the contract's refusal. `GET /` prints the attestation key.
 
+`NEAR_RPC` is an ordered, comma-separated list of nodes (default: the two public ones). One that cannot be reached is skipped for the next; put a provider you have a key for first. A transaction is sent again elsewhere only when the first node was never reached, not after a timeout.
+
+Before it listens, the relayer checks its account, its key and the bond contract against the network and says what is wrong if one is (`SKIP_PREFLIGHT=1` skips that). It logs a line to stderr for each upload, settlement, refusal and slashing, prints the attestation key at start-up, and answers `GET /healthz`. With `STATE_FILE=/path/state.jsonl` it keeps the first voucher of every sequence number and every double-spend found across restarts; without it a restart between a payer's two vouchers lets the cheat go unpunished, and it says so at start-up. A pair not yet slashed is retried every minute until the bond contract answers, since the vouchers have settled by then and no phone uploads them again. As a container: `docker build -t nearby-relayer .`, then run it with a volume on `/data` and the variables above (`--env-file`).
+
+The app never signs two vouchers with one sequence number, so a double-spend has to be made by hand. With a relayer running and a bond locked (`bond_for`, at least 1 NEAR) for a key of its own, which the contract then bans for good:
+
+```sh
+OFFLINE_SK=<64 hex> RELAYER_URL=http://<relayer host>:8787 RECEIVER=a.near OTHER_RECEIVER=b.near \
+  cargo run --release --bin settle-test -- cheat
+```
+
+It signs two payments with one sequence number, uploads both and prints the slashing transaction when the bond contract has answered. The payments need no balance: the pair is proof whether or not they settle.
+
 App, from `app/`, pointing at the relayer:
 
 ```sh
@@ -49,9 +62,11 @@ flutter build apk --debug \
 
 For iPhones, with Xcode signed into the developer account: `flutter run -d <iphone>` with the same `--dart-define`s, or `flutter build ipa` for TestFlight. The project carries our signing team; another team changes it in Xcode under Signing & Capabilities.
 
-Debug builds may use plain `http`; release and TestFlight builds need `https`. Without `RELAYER_URL` the app still pays, receives and relays, but never uploads. Without `RELAYER_KEY` there is no relayer whose balance attestations the app trusts, so payees skip the balance check (the receive screen says so) and enforce only the 25 USDC limit and the sequence numbers.
+Payees refuse a payer with less than 5 NEAR bonded; `--dart-define=MIN_BOND_NEAR=1` lowers that for one build, which is how the demo build is made: cheating costs 1 NEAR there, not 5.
 
-Tests: `cargo test` at the root (relayer and voucher), `cargo test -p nearby-bond`, `flutter test` in `app/`.
+Debug builds may use plain `http`; release and TestFlight builds need `https`. An Android release is signed with the debug key unless `app/android/key.properties` (`storeFile`, `storePassword`, `keyAlias`, `keyPassword`; git-ignored) names your own key: sign the one you publish. Without `RELAYER_URL` the app still pays, receives and relays, but never uploads. Without `RELAYER_KEY` there is no relayer whose balance attestations the app trusts, so payees skip the balance check (the receive screen says so) and enforce only the 25 USDC limit and the sequence numbers.
+
+Tests: `cargo test` at the root (relayer and voucher), `cargo test -p nearby-bond`, `flutter test` in `app/`. `cargo test -p nearby-relayer live_ -- --ignored` asks a real mainnet node two questions for free: does it accept our `send_tx` encoding, and do the start-up checks name their mistakes.
 
 ## Layout
 
@@ -60,7 +75,7 @@ Tests: `cargo test` at the root (relayer and voucher), `cargo test -p nearby-bon
 | `app/` | Flutter app (Android and iOS): offline wallet, voucher signing/verification, QR pay and receive, phone-to-phone relay, upload to the relayer |
 | `app/ios/Runner/Multipeer.swift` | The iOS radio: Multipeer Connectivity behind the same `Transport` interface as Android's Nearby Connections |
 | `relayer/` | Rust service: receives vouchers, calls `execute_intents`, signs balance attestations, keeps pairs of vouchers that prove a double-spend |
-| `relayer/src/bin/settle-test.rs` | Gate 1: sign a voucher now, submit it later, see whether it settles (`cargo run --bin settle-test -- sign`, then `submit`) |
+| `relayer/src/bin/settle-test.rs` | Gate 1: sign a voucher now, submit it later, see whether it settles (`cargo run --bin settle-test -- sign`, then `submit`); and `cheat`, which makes a double-spend and waits for the slashing |
 | `bond/` | NEAR contract (Rust, near-sdk): bonds in NEAR, `slash` with two equivocating vouchers, key bans |
 | `voucher/` | The voucher format shared by the relayer and the contract: shapes, NEP-413 hash, memo parsing |
 | `docs/` | Spec and threat model |
@@ -70,11 +85,13 @@ Tests: `cargo test` at the root (relayer and voucher), `cargo test -p nearby-bon
 
 Hackathon build for NEAR Hackathon (submissions close 2026-11-14 23:59 UTC). Mainnet only: Intents has no testnet deployment.
 
-Not yet proven: no voucher has settled with a funded account (only dry runs against mainnet), and the phone-to-phone relay has only run in tests, not on phones.
+Run on mainnet on 2026-11-14, through the relayer, with throwaway keys: a 0.10 USDC voucher [settled](https://nearblocks.io/txns/CAF2mqAyH4t6WHX5h1qtDQrvvwhbwkQtAyQGYEz15GhQ) on `intents.near`, and a double-spend made with `settle-test cheat` was [slashed](https://nearblocks.io/txns/7mmL3JL7cRwQyQVv3cPQuxMHnFmtcZrTM445iSkX5uQb) by the bond contract, which banned the key and took its 1 NEAR bond. The voucher was uploaded seconds after it was signed, not a day later, and it was signed by the test tool, not by a phone.
+
+Not yet proven: the phone-to-phone relay has only run in tests, not on phones.
 
 The relay is per platform: iPhones find iPhones, Android phones find Android phones, and the two never find each other. Everything else, including the QR path, works across the two.
 
-Double-spending offline is bounded, provable and punished, not prevented. A merchant with a signal need not take the risk: the payment is uploaded the moment it is accepted and the receive screen shows the chain's answer within seconds, settled, refused for good, or turned down for now with the reason (the payer's balance is short). A payer can still overspend across merchants who are offline and have not seen each other's vouchers, up to 25 USDC each, for as long as their attestation lasts. Two vouchers with one sequence number prove it; the relayer hands the pair to the bond contract, and the key forfeits its bond (5 NEAR or more) and is banned. The forfeited bond stays in the contract: paying it to the vouchers' receivers would let a cheat name their own accounts and slash themselves, and compensating the merchant left unpaid needs settlement evidence the contract does not have. The contract has 19 unit tests and has not been deployed or slashed on mainnet yet; the bond is in NEAR while the budget is in USDC, so the two are not compared, and a payer cheating many merchants in one afternoon can still take more than the bond.
+Double-spending offline is bounded, provable and punished, not prevented. A merchant with a signal need not take the risk: the payment is uploaded the moment it is accepted and the receive screen shows the chain's answer within seconds, settled, refused for good, or turned down for now with the reason (the payer's balance is short). A payer can still overspend across merchants who are offline and have not seen each other's vouchers, up to 25 USDC each, for as long as their attestation lasts. Two vouchers with one sequence number prove it; the relayer hands the pair to the bond contract, and the key forfeits its bond (5 NEAR or more) and is banned. The forfeited bond stays in the contract: paying it to the vouchers' receivers would let a cheat name their own accounts and slash themselves, and compensating the merchant left unpaid needs settlement evidence the contract does not have. The contract has 19 unit tests and one slashing on mainnet (above), on an account whose key we hold, so that deployment is a demonstration and not a place to lock a real bond; the bond is in NEAR while the budget is in USDC, so the two are not compared, and a payer cheating many merchants in one afternoon can still take more than the bond.
 
 Settlements travel back into the mesh: the relayer signs a receipt `{voucher, tx, block}` for each voucher it settles, and a phone that holds one hands it to any peer still carrying that voucher, which marks it settled and stops carrying it. A merchant whose phone stays offline learns of a customer's earlier payment settling when the customer (or anyone who synced) comes back, and until then counts it against them: a returning customer can still be refused before that happens, although their new attested balance already reflects the payment.
 
@@ -91,7 +108,7 @@ Everything in the first table runs in the automated tests (Rust: relayer, bond c
 | Offline ed25519 key; NEP-413 voucher signing and checking, byte-identical in Dart and Rust (`testdata/voucher-vector.json`), dry-run against mainnet `simulate_intents` | `app/lib/voucher/`, `voucher/` |
 | Payment request QR, voucher by radio or QR, payee checks: signature, request id, deadline, nonce, cap, sequence chain, bond, attested balance minus vouchers seen | `app/lib/screens/`, `app/lib/voucher/guards.dart` |
 | Store-and-forward gossip (have / want / voucher / settled) over Nearby Connections on Android and Multipeer Connectivity on iOS, hop limit 8 | `app/lib/mesh/`, `app/android/`, `app/ios/` |
-| Relayer: `execute_intents` settlement, nonce-spent detection, refusals, balance attestations, settlement receipts, double-spend pairs to the bond contract, `GET /equivocations` | `relayer/` |
+| Relayer: `execute_intents` settlement, nonce-spent detection, refusals, balance attestations, settlement receipts, double-spend pairs to the bond contract (kept across restarts, retried until answered), `GET /equivocations`, start-up checks, logs, `GET /healthz`, a Dockerfile | `relayer/` |
 | Bond contract: bond in NEAR, 7-day unbonding, `slash` recomputes both hashes and verifies both signatures on chain, forfeit and ban | `bond/` |
 | Receipts carried back into the mesh; the receive screen shows settled / refused / turned down live when the phone has a signal | `app/lib/mesh/gossip.dart`, `app/lib/screens/receive.dart` |
 

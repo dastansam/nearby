@@ -13,8 +13,9 @@ final paymentCap = BigInt.from(25000000);
 
 /// The least a payer must have locked in the bond contract to be paid offline: what cheating costs
 /// them. A policy knob, in whole NEAR; the bond is in NEAR because that is what any account can
-/// receive, and the budget in USDC, so the two are not compared.
-const minimumBondNear = 5;
+/// receive, and the budget in USDC, so the two are not compared. `MIN_BOND_NEAR` sets it for one
+/// build: the contract takes no bond under 1 NEAR.
+const minimumBondNear = int.fromEnvironment('MIN_BOND_NEAR', defaultValue: 5);
 final minimumBond = BigInt.from(minimumBondNear) * BigInt.from(10).pow(24);
 
 /// The payer chooses the deadline. One far off would let them unbond and withdraw (7 days in the
