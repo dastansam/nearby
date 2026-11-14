@@ -32,8 +32,6 @@ An offline payment is a signed message that must still be good hours later, subm
 | **Signed messages, not transactions** ([NEP-413](https://github.com/near/NEPs/blob/master/neps/nep-0413.md)). `execute_intents` takes a signed intent from *anyone* who holds it; the signature alone authorizes the transfer | The payer needs no gas, no network and no account on the relayer. The relayer is a courier that pays gas and holds nothing: any phone, or the merchant, could call `execute_intents` instead. The protocol's own `deadline` expires stale vouchers, and `recipient = intents.near` stops replay anywhere else | EIP-3009 and Permit2 give the same courier model for the tokens that support them. Other meta-transaction relayers are a trusted contract with its own nonce scheme, or a custodian |
 | **An account is a key.** A NEAR implicit account is the hex of its ed25519 public key | The offline wallet exists the moment the phone makes a key: no transaction, fee or server. The merchant verifies the payer's identity offline from the voucher alone, and `env::ed25519_verify` lets the bond contract check both signatures of a double-spend on chain | An EVM EOA also exists for free, can sign EIP-3009 or Permit2 authorizations, and `ecrecover` lets a contract check its signatures. NEAR is convenient here, not unique |
 
-Two more things fall out of settling through Intents rather than a contract of our own. The relayer never touches funds, so a bug or a rogue operator can at worst delay a payment (vouchers can be submitted by anyone else). And a merchant's USDC lands inside `intents.near`, where the same 1Click service the app uses for top-ups can turn it into any asset Intents supports, so cashing out to another chain needs no code from us.
-
 ## How it works
 
 ```mermaid
@@ -60,7 +58,6 @@ flowchart LR
    - *The budget: USDC inside `intents.near`.* The Top up button asks NEAR Intents' swap service (1Click) for a deposit address, and NEAR sent there from any wallet or exchange arrives as USDC in the phone's balance about half a minute later. A swap that fails credits the NEAR back to the phone's account inside `intents.near`, where the app cannot spend it yet. Nothing is locked: vouchers draw on this deposit.
    - *The bond: NEAR in the bond contract, what cheating costs.* `bond_for(<account>)` with at least 1 NEAR attached, by hand with the `near` CLI (step 4 under *Try it*). The offline account holds no NEAR for gas, so the user's main wallet, or anyone, pays; whoever pays first owns the bond. Payees refuse a payer with less than 5 NEAR bonded, and the pay screen says so until the phone has gone online once and fetched an attestation that shows the bond.
 
-   The two are kept apart because any wallet can send NEAR to a contract today, while moving USDC out of Intents into a bond would need an intent of its own and shrink the budget. The price is that the bond and the budget are never compared (see *Double-spend model*). Nothing in the app takes money out again.
 2. **Pay (offline).** The payer signs a NEP-413 `transfer` intent, the *voucher*, with a random 32-byte nonce, a 72 h deadline, the merchant's request id and the payer's next sequence number in the memo.
 3. **Verify (offline).** The merchant checks the signature, the deadline and the nonce, then the payer: no payment over 25 USDC, a sequence number not seen before from that payer, a bond of at least 5 NEAR, and a balance the relayer attested in the last 24 h that still covers the payment after subtracting every voucher of that payer this phone has seen. The attestation (balance and bond, signed by the relayer) travels with the voucher, in the QR code and over the relay.
 4. **Relay (offline).** Every phone keeps an outbox. When two phones connect they tell each other what they have and send what the other lacks, until one of them reaches the internet.
@@ -151,9 +148,7 @@ flutter build apk --debug \
 
 For iPhones, with Xcode signed into a developer account: `flutter run -d <iphone>` with the same `--dart-define`s, or `flutter build ipa` for TestFlight. The project carries our signing team; another team changes it in Xcode under Signing & Capabilities.
 
-On first launch the app shows a fresh account and a Top up button. Top up asks how much USDC you want and shows a NEAR Intents deposit address and the NEAR to send; the balance appears once the swap lands (about half a minute). Pay scans a merchant's request QR and signs; Receive shows a request QR and takes the voucher by camera or over the radio. The receive screen shows the chain's answer as soon as the phone has a signal: settled (with a link to the transaction), refused for good, or turned down for now with the reason.
-
-Build-time knobs: `--dart-define=MIN_BOND_NEAR=1` lowers the 5 NEAR bond payees demand, which is how the demo build above was made (cheating cost 1 NEAR there, not 5). Debug builds may use plain `http`; release and TestFlight builds need `https`. Without `RELAYER_URL` the app still pays, receives and relays, but never uploads. Without `RELAYER_KEY` there is no relayer whose attestations the app trusts, so payees skip the balance and bond checks (the receive screen says so) and enforce only the 25 USDC cap and the sequence numbers. An Android release is signed with the debug key unless `app/android/key.properties` (`storeFile`, `storePassword`, `keyAlias`, `keyPassword`; git-ignored) names your own key.
+Build-time knobs: `--dart-define=MIN_BOND_NEAR=1` lowers the 5 NEAR bond payees demand, which is how the demo build above was made (cheating cost 1 NEAR there, not 5). Debug builds may use plain `http`; release and TestFlight builds need `https`. Without `RELAYER_URL` the app still pays, receives and relays, but never uploads. Without `RELAYER_KEY` there is no relayer whose attestations the app trusts, so payees skip the balance and bond checks (the receive screen says so) and enforce only the 25 USDC cap and the sequence numbers.
 
 ### 6. Reproduce the slashing
 
@@ -186,7 +181,7 @@ Protocol guards for free: NEP-413's `recipient = intents.near` blocks replay on 
 - The forfeited bond stays in the contract. Paying it to the vouchers' receivers would let a cheat name their own accounts and slash themselves, and compensating the merchant left unpaid needs settlement evidence the contract does not have.
 - The relayer is trusted for one thing: the balance attestation. A relayer that signs a false balance makes merchants accept payments that will not settle. It cannot take funds (vouchers are submitted, not custodied), and anyone can run one and pin their own key in a build; but each app build trusts exactly one.
 - Bond ownership is first come, first served. Whoever bonds an account first owns its bond, so a stranger can bond one for 1 NEAR and, by never unbonding, keep its wallet from bonding it for good.
-- A refusal cannot unsign a voucher. A payment the merchant's phone refused can still be carried to the relayer and settle; the receive screen says so.
+- **A payment can settle even though the merchant refused it.** A refusal cannot unsign a voucher: one the merchant's phone turned down can still be carried to the relayer and settle; the receive screen says so.
 - A merchant whose phone stays offline learns of a customer's earlier payment settling only when the customer (or anyone who synced) comes back with the receipt, and counts it against them until then: a returning customer can be refused before that happens, although their new attested balance already reflects the payment.
 - Keys live in the platform's secure storage (`flutter_secure_storage`), not in hardware-backed keystores with attestation.
 - **Reinstalling can get an honest payer slashed.** On an iPhone the key survives a reinstall in the Keychain, but the database the next sequence number is derived from does not, so the next payment reuses number 1 and the relayer's journal pairs it with the old one. On Android an uninstall loses the key and, with no export, the funds.
@@ -217,34 +212,11 @@ Everything in the table runs in the automated tests; the "Proof on mainnet" tabl
 - The relayer pays gas for every valid voucher, with no fee, minimum amount or rate limit, and settles one voucher at a time because one lock is held across its RPC calls. Anyone can spend its gas or slow it for everyone.
 - A merchant cannot cash out from the app, a bond is locked by hand with the `near` CLI, and there is no key export or backup. That is the distance left to "a company could use it tomorrow".
 
-| Next | Why not yet |
-| --- | --- |
-| Relay along a chain of real phones, and on Android | One hop between two iPhones so far |
-| Bond ownership bound to the payer's key | Today whoever bonds an account first owns its bond |
-| Compensating the unpaid merchant from a forfeited bond | Needs settlement evidence the contract does not have |
-| Locking the bond from the app, and withdrawing | Both are by hand today (`near` CLI) |
-| Hardware-held offline keys (StrongBox / Secure Enclave), attested by the relayer | Stretch |
-| Receipts pushed to peers already connected | They go out in reply to the next `have` |
-| Who pays gas: a fee per voucher or a sponsor | Open question; the relayer pays today |
-
-## Layout
-
-| Path | What |
-| --- | --- |
-| `app/` | Flutter app (Android and iOS): offline wallet, voucher signing and verification, QR pay and receive, phone-to-phone relay, upload to the relayer, top-up |
-| `app/ios/Runner/Multipeer.swift` | The iOS radio: Multipeer Connectivity behind the same `Transport` interface as Android's Nearby Connections |
-| `relayer/` | Rust service: receives vouchers, calls `execute_intents`, signs balance attestations and settlement receipts, keeps double-spend pairs and submits them to the bond contract |
-| `relayer/src/bin/settle-test.rs` | `sign` / `submit` (Gate 1: sign a voucher now, settle it later) and `cheat` (make a double-spend, wait for the slashing) |
-| `bond/` | NEAR contract (Rust, near-sdk): bonds in NEAR, `slash` with two equivocating vouchers, key bans |
-| `voucher/` | The voucher format shared by the relayer and the contract: shapes, NEP-413 hash, memo parsing |
-| `docs/SPEC.md` | The early build plan. It is out of date in places (a USDC bond paid to the merchant, a demo on three Android phones); where it differs from this README, the README is what was built |
-| `testdata/` | Voucher, balance attestation and settlement receipt test vectors shared by the Dart and Rust code |
-
 ## Hackathon notes
 
 The gossip layer, the Multipeer plugin, the NEP-413 implementation in Dart, the relayer and the bond contract are written here, not taken from a library; the dependencies are in `app/pubspec.yaml` and the `Cargo.toml` files. The code was written with Claude Code as a pair programmer.
 
-The author works at [qaul](https://qaul.net), an offline messenger, as an engineer focused on networking and cryptography; store-and-forward over local radios is the day job, and that is why the mesh here is written rather than imported. The author is also part of [ainek](https://github.com/sadabaevb/ainek), another project in the same hackathon. Built for the [NEAR Hackathon](https://nearhackathon.com) 2026, tracks Real-World Money and Open Innovation. All code in this repository was written between 2026-11-05 and 2026-11-14 UTC; there is no earlier baseline to diff against. `git log` shows the last evening's commits as 15 November because the author's clock is at +06:00; `TZ=UTC git log --date=iso-local` shows every commit before 2026-11-14 23:59 UTC. Mainnet only: NEAR Intents has no testnet deployment.
+The author works at [qaul](https://qaul.net), an offline messenger, as an engineer focused on networking and cryptography; store-and-forward over local radios is the day job, and that is why the mesh here is written rather than imported. The author is also part of [ainek](https://github.com/sadabaevb/ainek), another project in the same hackathon. Built for the [NEAR Hackathon](https://nearhackathon.com) 2026, tracks Real-World Money and Open Innovation. All code in this repository was written between 2026-11-05 and 2026-11-14 UTC; there is no earlier baseline to diff against. `git log` shows the last evening's commits as 15 November because the author's clock is at +06:00; `TZ=UTC git log --date=iso-local` shows every commit before 2026-11-14 23:59 UTC. Mainnet only: NEAR Intents has no testnet deployment. `docs/SPEC.md` is the early build plan and is out of date in places (a USDC bond paid to the merchant, a demo on three Android phones); where it differs from this README, the README is what was built.
 
 ## License
 
