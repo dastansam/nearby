@@ -6,7 +6,7 @@ Offline payments between phones, settled on NEAR through [NEAR Intents](https://
 
 [Watch the 2-minute demo](https://x.com/kingleard_/status/2121745916180959736).
 
-The payer signs a NEAR Intents `transfer` on their phone with no network. The merchant's phone checks it offline and takes it, by QR code or over Bluetooth / Wi-Fi ([Nearby Connections](https://developers.google.com/nearby/connections/overview) on Android, [Multipeer Connectivity](https://developer.apple.com/documentation/multipeerconnectivity) on iOS). Phones carry it hop by hop until one has a signal; that phone hands it to a relayer, which settles it on `intents.near`. A payer who signs two payments under one sequence number loses a NEAR bond, on chain, to a contract that checks both signatures itself.
+The payer signs a NEAR Intents `transfer` on their phone with no network. The merchant's phone checks it offline and takes it, by QR code or over Bluetooth / Wi-Fi ([Nearby Connections](https://developers.google.com/nearby/connections/overview) on Android, [Multipeer Connectivity](https://developer.apple.com/documentation/multipeerconnectivity) on iOS). Phones carry it hop by hop until one has a signal; that phone hands it to a relayer, which settles it on `intents.near`. So far that has run once on real phones, across one hop between two iPhones; see [Status](#status). A payer who signs two payments under one sequence number loses a NEAR bond, on chain, to a contract that checks both signatures itself.
 
 ## Proof on mainnet
 
@@ -185,10 +185,11 @@ Protocol guards for free: NEP-413's `recipient = intents.near` blocks replay on 
 - **A "settled" answer can be wrong for a nonce the relayer never saw.** When the chain shows a nonce as used and the relayer has no record of which voucher used it, the relayer answers `settled` (`ask_chain` in `relayer/src/settle.rs`). A payer can sign two vouchers on one nonce with different sequence numbers, one to their own account and one to the merchant, and submit the first themselves. The merchant's upload of the second is then answered "Paid and settled on chain" though nothing was paid, and the pair is not slashable because the sequence numbers differ. The fix is to check what the settling transaction transferred, not only that the nonce is used; it is not in this build.
 - The forfeited bond stays in the contract. Paying it to the vouchers' receivers would let a cheat name their own accounts and slash themselves, and compensating the merchant left unpaid needs settlement evidence the contract does not have.
 - The relayer is trusted for one thing: the balance attestation. A relayer that signs a false balance makes merchants accept payments that will not settle. It cannot take funds (vouchers are submitted, not custodied), and anyone can run one and pin their own key in a build; but each app build trusts exactly one.
-- Bond ownership is first come, first served. Whoever bonds an account first owns its bond, so a stranger can bond one for 1 NEAR (locked 7 days) and keep its wallet from bonding it.
+- Bond ownership is first come, first served. Whoever bonds an account first owns its bond, so a stranger can bond one for 1 NEAR and, by never unbonding, keep its wallet from bonding it for good.
 - A refusal cannot unsign a voucher. A payment the merchant's phone refused can still be carried to the relayer and settle; the receive screen says so.
 - A merchant whose phone stays offline learns of a customer's earlier payment settling only when the customer (or anyone who synced) comes back with the receipt, and counts it against them until then: a returning customer can be refused before that happens, although their new attested balance already reflects the payment.
 - Keys live in the platform's secure storage (`flutter_secure_storage`), not in hardware-backed keystores with attestation.
+- **Reinstalling can get an honest payer slashed.** On an iPhone the key survives a reinstall in the Keychain, but the database the next sequence number is derived from does not, so the next payment reuses number 1 and the relayer's journal pairs it with the old one. On Android an uninstall loses the key and, with no export, the funds.
 
 ## Status
 
@@ -207,11 +208,14 @@ Everything in the table runs in the automated tests; the "Proof on mainnet" tabl
 
 **Not yet shown**, and the biggest gaps between the tests and the pitch:
 
-- The radio relay has carried one voucher, across one hop, between two iPhones (Multipeer). That the second phone did the upload is read from the relayer's log and the payer's screen recording; the log does not name the uploader. A chain of several phones, and Nearby Connections on Android, have only run in tests with fake transports.
+- The radio relay has carried one voucher, across one hop, between two iPhones (Multipeer). That the second phone did the upload is read from the relayer's log and the payer's screen recording; the log does not name the uploader. A chain of several phones, and Nearby Connections on Android, have only run in tests with fake transports. The Android app has not been run on a device.
+- On iPhones the relay works only while the app is on screen: iOS stops discovery and drops the links when the app goes to the background (`app/ios/Runner/Multipeer.swift`).
 - No voucher has been held for longer than a few minutes before settling. The design allows 72 hours; nothing has tested that in the wild.
 - The relay is per platform: iPhones find iPhones, Android phones find Android phones, and the two never find each other. Everything else, including the QR path, works across the two.
-- The deployed bond contract is on an account whose key we hold. That deployment is a demonstration, not a place to lock a real bond.
-- Nothing is pruned from the store yet; relays refuse vouchers valid longer than 7 days as a stopgap.
+- The demo's bond contract, relayer and gas payer are one account, `19060bbcfe16c687689d1bdc2b705b38c550f87be8235e0b848c53998825ca15`: the slashing transaction's signer and receiver are the same, and the relayer's key is the contract's full-access key. That deployment is a demonstration, not a place to lock a real bond.
+- Nothing is pruned from the store yet; relays refuse vouchers valid longer than 7 days as a stopgap. Any phone can push validly signed vouchers that will never settle and they are kept, and a voucher's hop count is whatever the sender says.
+- The relayer pays gas for every valid voucher, with no fee, minimum amount or rate limit, and settles one voucher at a time because one lock is held across its RPC calls. Anyone can spend its gas or slow it for everyone.
+- A merchant cannot cash out from the app, a bond is locked by hand with the `near` CLI, and there is no key export or backup. That is the distance left to "a company could use it tomorrow".
 
 | Next | Why not yet |
 | --- | --- |
@@ -233,14 +237,14 @@ Everything in the table runs in the automated tests; the "Proof on mainnet" tabl
 | `relayer/src/bin/settle-test.rs` | `sign` / `submit` (Gate 1: sign a voucher now, settle it later) and `cheat` (make a double-spend, wait for the slashing) |
 | `bond/` | NEAR contract (Rust, near-sdk): bonds in NEAR, `slash` with two equivocating vouchers, key bans |
 | `voucher/` | The voucher format shared by the relayer and the contract: shapes, NEP-413 hash, memo parsing |
-| `docs/SPEC.md` | The build plan, threat model and the decisions made along the way |
+| `docs/SPEC.md` | The early build plan. It is out of date in places (a USDC bond paid to the merchant, a demo on three Android phones); where it differs from this README, the README is what was built |
 | `testdata/` | Voucher, balance attestation and settlement receipt test vectors shared by the Dart and Rust code |
 
 ## Hackathon notes
 
 The gossip layer, the Multipeer plugin, the NEP-413 implementation in Dart, the relayer and the bond contract are written here, not taken from a library; the dependencies are in `app/pubspec.yaml` and the `Cargo.toml` files. The code was written with Claude Code as a pair programmer.
 
-The author works at [qaul](https://qaul.net), an offline messenger, as an engineer focused on networking and cryptography; store-and-forward over local radios is the day job, and that is why the mesh here is written rather than imported. The author is also part of [ainek](https://github.com/sadabaevb/ainek), another project in the same hackathon. Built for the [NEAR Hackathon](https://nearhackathon.com) 2026, tracks Real-World Money and Open Innovation. All code in this repository was written between 2026-11-05 and 2026-11-14 UTC; there is no earlier baseline to diff against. Mainnet only: NEAR Intents has no testnet deployment.
+The author works at [qaul](https://qaul.net), an offline messenger, as an engineer focused on networking and cryptography; store-and-forward over local radios is the day job, and that is why the mesh here is written rather than imported. The author is also part of [ainek](https://github.com/sadabaevb/ainek), another project in the same hackathon. Built for the [NEAR Hackathon](https://nearhackathon.com) 2026, tracks Real-World Money and Open Innovation. All code in this repository was written between 2026-11-05 and 2026-11-14 UTC; there is no earlier baseline to diff against. `git log` shows the last evening's commits as 15 November because the author's clock is at +06:00; `TZ=UTC git log --date=iso-local` shows every commit before 2026-11-14 23:59 UTC. Mainnet only: NEAR Intents has no testnet deployment.
 
 ## License
 
