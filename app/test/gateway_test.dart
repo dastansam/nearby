@@ -285,6 +285,45 @@ void main() {
       expect((await attestationFor(mine, account))!.balance, BigInt.from(5000000));
     });
 
+    // The merchant watching the screen: the money has arrived on chain, and a balance that still
+    // shows the old figure for ten minutes reads as "it did not work".
+    test('is fetched again the moment a payment settles, however fresh the one held', () async {
+      final relayer = await Ed25519().newKeyPair();
+      relayerKey = await publicKeyOf(relayer);
+      var balance = '5000000';
+      final attempts = StreamController<void>.broadcast();
+      final g = Gateway(mine, 'https://relayer.test',
+          account: account,
+          onChange: () => attempts.add(null),
+          client: MockClient((request) async {
+            if (request.url.path == '/healthz') return http.Response('{"ok":true}', 200);
+            if (request.method == 'POST') {
+              final vouchers = jsonDecode(request.body)['vouchers'] as List;
+              if (vouchers.isNotEmpty) balance = '7500000'; // settling is what moves it
+              return http.Response(
+                  jsonEncode({'results': vouchers.map((_) => {'status': 'settled', 'tx': 'tx1', 'block': 5000}).toList()}),
+                  200);
+            }
+            fetched.add(request.url.toString());
+            return http.Response(jsonEncode(await signAttestation(relayer, account, balance, block: 5001)), 200);
+          }));
+      addTearDown(g.stop);
+
+      final first = attempts.stream.first;
+      g.start(); // nothing to settle yet: the first attestation
+      await first.timeout(const Duration(seconds: 5));
+      expect((await attestationFor(mine, account))!.balance, BigInt.from(5000000));
+
+      final second = attempts.stream.first;
+      await mine.put(
+          await signVoucher(await Ed25519().newKeyPair(), [Transfer(account, {usdcToken: '2500000'})],
+              DateTime.now().add(const Duration(hours: 72)), makeNonce()),
+          VoucherKind.received);
+      await second.timeout(const Duration(seconds: 5));
+      expect(fetched.length, 2, reason: 'the one held is seconds old, and is replaced all the same');
+      expect((await attestationFor(mine, account))!.balance, BigInt.from(7500000));
+    });
+
     test('signed by a key this build does not trust is reported, not quietly dropped', () async {
       // A build with a mistyped RELAYER_KEY would otherwise say "go online" forever, with nothing to explain it.
       relayerKey = await publicKeyOf(await Ed25519().newKeyPair());
