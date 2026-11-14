@@ -83,7 +83,7 @@ Tests: `cargo test` at the root (relayer and voucher), `cargo test -p nearby-bon
 
 ## Status
 
-Hackathon build for NEAR Hackathon (submissions close 2026-11-14 23:59 UTC). Mainnet only: Intents has no testnet deployment.
+Hackathon build for NEAR Hackathon (submissions close 2026-11-14 23:59 UTC). Mainnet only: Intents has no testnet deployment. The author is also part of [ainek](https://github.com/sadabaevb/ainek), another project in the same hackathon.
 
 Run on mainnet on 2026-11-14, through the relayer, with throwaway keys: a 0.10 USDC voucher [settled](https://nearblocks.io/txns/CAF2mqAyH4t6WHX5h1qtDQrvvwhbwkQtAyQGYEz15GhQ) on `intents.near`, and a double-spend made with `settle-test cheat` was [slashed](https://nearblocks.io/txns/7mmL3JL7cRwQyQVv3cPQuxMHnFmtcZrTM445iSkX5uQb) by the bond contract, which banned the key and took its 1 NEAR bond. The voucher was uploaded seconds after it was signed, not a day later, and it was signed by the test tool, not by a phone.
 
