@@ -9,6 +9,7 @@ app/.packages
 # Rust
 target/
 relayer/.env
+relayer/demo.env
 
 # Keys, and signed vouchers: anyone holding one can submit it
 relayer/voucher.json
