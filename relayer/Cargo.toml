@@ -3,6 +3,8 @@ name = "nearby-relayer"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+# `cargo run` is the relayer; the test tool is `cargo run --bin settle-test`.
+default-run = "nearby-relayer"
 
 [dependencies]
 axum = "0.8"

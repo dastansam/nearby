@@ -4,6 +4,8 @@ docs
 testdata
 .git
 relayer/.env
+relayer/demo.env
 relayer/voucher.json
+keys
 **/*.key
 **/.env
