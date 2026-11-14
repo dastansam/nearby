@@ -4,11 +4,9 @@ Offline payments between phones, settled on NEAR through [NEAR Intents](https://
 
 > Pay anyone nearby, even with no signal. Settled on NEAR.
 
-Demo video (2 minutes): [the post on X](https://x.com/kingleard_/status/2121745916180959736).
+[Watch the 2-minute demo](https://x.com/kingleard_/status/2121745916180959736).
 
 The payer signs a NEAR Intents `transfer` on their phone with no network. The merchant's phone checks it offline and takes it, by QR code or over Bluetooth / Wi-Fi ([Nearby Connections](https://developers.google.com/nearby/connections/overview) on Android, [Multipeer Connectivity](https://developer.apple.com/documentation/multipeerconnectivity) on iOS). Phones carry it hop by hop until one has a signal; that phone hands it to a relayer, which settles it on `intents.near`. A payer who signs the same payment twice loses a NEAR bond, on chain, to a contract that checks both signatures itself.
-
-Built for the [NEAR Hackathon](https://nearhackathon.com) 2026 (tracks: Real-World Money, Open Innovation). Every commit is from 2026-11-05 to 2026-11-14 UTC; there is no pre-hackathon baseline. Mainnet only: NEAR Intents has no testnet deployment.
 
 ## Proof on mainnet
 
@@ -16,11 +14,11 @@ Everything below ran on mainnet on 2026-11-14 with throwaway keys. Click through
 
 | What | Transaction |
 | --- | --- |
-| A 0.10 USDC voucher, signed by the test tool, settled through the relayer | [CAF2mq…](https://nearblocks.io/txns/CAF2mqAyH4t6WHX5h1qtDQrvvwhbwkQtAyQGYEz15GhQ) |
-| A double-spend made with `settle-test cheat`, slashed by the bond contract: key banned, 1 NEAR bond forfeited | [7mmL3J…](https://nearblocks.io/txns/7mmL3JL7cRwQyQVv3cPQuxMHnFmtcZrTM445iSkX5uQb) |
-| Two iPhones paid each other by QR code in airplane mode, once in each direction. Each voucher was signed with no relayer in reach and uploaded 35 s and 21 s later, when a phone had its signal back | [9xRH29…](https://nearblocks.io/txns/9xRH29n2pZmnTvLyX71FGpVqXbsSNysReBYMi615bz7n), [5Guouw…](https://nearblocks.io/txns/5GuouwTLSrwsu466YwsELrbFdJcsPyyBEkwL4AoVsHRm) |
-| A top-up through the app's Top up button: 0.347 NEAR sent to a NEAR Intents 1Click deposit address, arriving as 1 USDC in the phone's offline balance | [SENh7o…](https://nearblocks.io/txns/SENh7o6Tum1gXeHnoyHNcjNg1EEBL3pGxMEG1jMU6D7) |
-| One hop by radio between two iPhones: a 0.05 USDC voucher signed on an iPhone in airplane mode, for a payee that was only a QR on a screen, passed to the other iPhone over Multipeer Connectivity and uploaded by it. The payer's phone showed it settled while still in airplane mode | [3cEkjM…](https://nearblocks.io/txns/3cEkjMdfYCcRjpGvy7AM8iLKK9YVueyKAaRNcnRt3NZR) |
+| A 0.10 USDC voucher, signed by the test tool, settled through the relayer | [settlement](https://nearblocks.io/txns/CAF2mqAyH4t6WHX5h1qtDQrvvwhbwkQtAyQGYEz15GhQ) |
+| A double-spend made with `settle-test cheat`, slashed by the bond contract: key banned, 1 NEAR bond forfeited | [slashing](https://nearblocks.io/txns/7mmL3JL7cRwQyQVv3cPQuxMHnFmtcZrTM445iSkX5uQb) |
+| Two iPhones paid each other by QR code in airplane mode, once in each direction. Each voucher was signed with no relayer in reach and uploaded 35 s and 21 s later, when a phone had its signal back | [first payment](https://nearblocks.io/txns/9xRH29n2pZmnTvLyX71FGpVqXbsSNysReBYMi615bz7n), [second payment](https://nearblocks.io/txns/5GuouwTLSrwsu466YwsELrbFdJcsPyyBEkwL4AoVsHRm) |
+| A top-up through the app's Top up button: 0.347 NEAR sent to a NEAR Intents 1Click deposit address, arriving as 1 USDC in the phone's offline balance | [top-up](https://nearblocks.io/txns/SENh7o6Tum1gXeHnoyHNcjNg1EEBL3pGxMEG1jMU6D7) |
+| One hop by radio between two iPhones: a 0.05 USDC voucher signed on an iPhone in airplane mode, for a payee that was only a QR on a screen, passed to the other iPhone over Multipeer Connectivity and uploaded by it. The payer's phone showed it settled while still in airplane mode | [relayed payment](https://nearblocks.io/txns/3cEkjMdfYCcRjpGvy7AM8iLKK9YVueyKAaRNcnRt3NZR) |
 
 What has *not* been shown yet is listed under [Status](#status), and it matters: the radio relay has carried one voucher across one hop between two iPhones, not along a chain of phones, and no voucher has waited longer than a few minutes for a signal.
 
@@ -85,7 +83,7 @@ cargo test -p nearby-bond   # the bond contract, against near-sdk's unit-testing
 cd app && flutter test      # the app
 ```
 
-You should see `test result: ok` four times (19 passed with 2 ignored, 41, 2, and 19 for the contract) and `All tests passed!` from Flutter (120 tests). The ignored two are `live_` tests that ask a real mainnet node whether it accepts our `send_tx` encoding and whether the start-up checks name their mistakes; `cargo test -p nearby-relayer live_ -- --ignored` runs them, for free.
+Every `test result:` line should say `ok`: 19 passed (2 ignored), 41 and 2 from the first command, 19 from the contract, and `All tests passed!` from Flutter (120 tests). The lines with 0 tests are binaries and doc-tests that have none. The ignored two are `live_` tests that ask a real mainnet node whether it accepts our `send_tx` encoding and whether the start-up checks name their mistakes; `cargo test -p nearby-relayer live_ -- --ignored` runs them, for free.
 
 The Dart and Rust implementations of voucher signing are pinned to the same bytes by `testdata/voucher-vector.json`, and likewise the balance attestation and settlement receipt formats (`attestation-vector.json`, `receipt-vector.json`). Change one side and the other side's test fails.
 
@@ -206,8 +204,6 @@ Everything in the table runs in the automated tests; the "Proof on mainnet" tabl
 | Bond contract: bond in NEAR, owner-only top-up and withdrawal, 7-day unbonding, `slash` recomputes both hashes and verifies both signatures on chain, forfeit and ban; 19 unit tests | `bond/` |
 | Receipts carried back into the mesh; the receive screen shows settled / refused / turned down live, with a link to the transaction | `app/lib/mesh/gossip.dart`, `app/lib/screens/receive.dart` |
 
-**Shown on mainnet:** one settlement through the relayer, one slashing, two phone-to-phone QR payments in airplane mode, one voucher relayed by radio from one iPhone to another, one top-up through the app (table at the top).
-
 **Not yet shown**, and the biggest gaps between the tests and the pitch:
 
 - The radio relay has carried one voucher, across one hop, between two iPhones (Multipeer). That the second phone did the upload is read from the relayer's log and the payer's screen recording; the log does not name the uploader. A chain of several phones, and Nearby Connections on Android, have only run in tests with fake transports.
@@ -239,17 +235,11 @@ Everything in the table runs in the automated tests; the "Proof on mainnet" tabl
 | `docs/SPEC.md` | The build plan, threat model and the decisions made along the way |
 | `testdata/` | Voucher, balance attestation and settlement receipt test vectors shared by the Dart and Rust code |
 
-## Libraries
-
-App (Flutter): `cryptography` (ed25519, sha256), `crypto`, `bs58`, `convert`, `sqflite`, `qr_flutter`, `mobile_scanner`, `flutter_secure_storage`, `http`, `nearby_connections`, `permission_handler`, `url_launcher`; on iOS, Apple's Multipeer Connectivity through a small Swift plugin of our own.
-Relayer (Rust): `axum`, `tokio`, `reqwest`, `ed25519-dalek`, `serde` / `serde_json`, `sha2`, `base64`, `bs58`, `hex`, `rand`, `regex`, `chrono`.
-Bond contract (Rust): `near-sdk`. Shared voucher crate: `serde_json`, `sha2`, `bs58`, `base64`, `hex`, with `ed25519-dalek` and `rand` behind the `sign` feature.
-
-The gossip layer, the Multipeer plugin, the NEP-413 implementation in Dart, the relayer and the bond contract are written here, not taken from a library. The code was written with Claude Code as a pair programmer.
-
 ## Hackathon notes
 
-The author works at [qaul](https://qaul.net), an offline messenger, as an engineer focused on networking and cryptography; store-and-forward over local radios is the day job, and that is why the mesh here is written rather than imported. The author is also part of [ainek](https://github.com/sadabaevb/ainek), another project in the same hackathon. All code in this repository was written between 2026-11-05 and 2026-11-14 UTC; there is no earlier baseline to diff against.
+The gossip layer, the Multipeer plugin, the NEP-413 implementation in Dart, the relayer and the bond contract are written here, not taken from a library; the dependencies are in `app/pubspec.yaml` and the `Cargo.toml` files. The code was written with Claude Code as a pair programmer.
+
+The author works at [qaul](https://qaul.net), an offline messenger, as an engineer focused on networking and cryptography; store-and-forward over local radios is the day job, and that is why the mesh here is written rather than imported. The author is also part of [ainek](https://github.com/sadabaevb/ainek), another project in the same hackathon. Built for the [NEAR Hackathon](https://nearhackathon.com) 2026, tracks Real-World Money and Open Innovation. All code in this repository was written between 2026-11-05 and 2026-11-14 UTC; there is no earlier baseline to diff against. Mainnet only: NEAR Intents has no testnet deployment.
 
 ## License
 
