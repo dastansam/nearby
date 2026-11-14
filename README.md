@@ -242,7 +242,7 @@ The gossip layer, the Multipeer plugin, the NEP-413 implementation in Dart, the 
 
 ## Hackathon notes
 
-The author is also part of [ainek](https://github.com/sadabaevb/ainek), another project in the same hackathon. All code in this repository was written between 2026-11-05 and 2026-11-14 UTC; there is no earlier baseline to diff against.
+The author works at [qaul](https://qaul.net), an offline messenger, as an engineer focused on networking and cryptography; store-and-forward over local radios is the day job, and that is why the mesh here is written rather than imported. The author is also part of [ainek](https://github.com/sadabaevb/ainek), another project in the same hackathon. All code in this repository was written between 2026-11-05 and 2026-11-14 UTC; there is no earlier baseline to diff against.
 
 ## License
 
