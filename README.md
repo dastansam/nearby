@@ -85,7 +85,7 @@ cargo test -p nearby-bond   # the bond contract, against near-sdk's unit-testing
 cd app && flutter test      # the app
 ```
 
-You should see `test result: ok` four times (19 passed with 2 ignored, 41, 2, and 19 for the contract) and `All tests passed!` from Flutter (120 tests). The ignored two are `live_` tests that ask a real mainnet node whether it accepts our `send_tx` encoding and whether the start-up checks name their mistakes; `cargo test -p nearby-relayer live_ -- --ignored` runs them, for free.
+Every `test result:` line should say `ok`: 19 passed (2 ignored), 41 and 2 from the first command, 19 from the contract, and `All tests passed!` from Flutter (120 tests). The lines with 0 tests are binaries and doc-tests that have none. The ignored two are `live_` tests that ask a real mainnet node whether it accepts our `send_tx` encoding and whether the start-up checks name their mistakes; `cargo test -p nearby-relayer live_ -- --ignored` runs them, for free.
 
 The Dart and Rust implementations of voucher signing are pinned to the same bytes by `testdata/voucher-vector.json`, and likewise the balance attestation and settlement receipt formats (`attestation-vector.json`, `receipt-vector.json`). Change one side and the other side's test fails.
 
@@ -206,8 +206,6 @@ Everything in the table runs in the automated tests; the "Proof on mainnet" tabl
 | Bond contract: bond in NEAR, owner-only top-up and withdrawal, 7-day unbonding, `slash` recomputes both hashes and verifies both signatures on chain, forfeit and ban; 19 unit tests | `bond/` |
 | Receipts carried back into the mesh; the receive screen shows settled / refused / turned down live, with a link to the transaction | `app/lib/mesh/gossip.dart`, `app/lib/screens/receive.dart` |
 
-**Shown on mainnet:** one settlement through the relayer, one slashing, two phone-to-phone QR payments in airplane mode, one voucher relayed by radio from one iPhone to another, one top-up through the app (table at the top).
-
 **Not yet shown**, and the biggest gaps between the tests and the pitch:
 
 - The radio relay has carried one voucher, across one hop, between two iPhones (Multipeer). That the second phone did the upload is read from the relayer's log and the payer's screen recording; the log does not name the uploader. A chain of several phones, and Nearby Connections on Android, have only run in tests with fake transports.
@@ -239,15 +237,9 @@ Everything in the table runs in the automated tests; the "Proof on mainnet" tabl
 | `docs/SPEC.md` | The build plan, threat model and the decisions made along the way |
 | `testdata/` | Voucher, balance attestation and settlement receipt test vectors shared by the Dart and Rust code |
 
-## Libraries
-
-App (Flutter): `cryptography` (ed25519, sha256), `crypto`, `bs58`, `convert`, `sqflite`, `qr_flutter`, `mobile_scanner`, `flutter_secure_storage`, `http`, `nearby_connections`, `permission_handler`, `url_launcher`; on iOS, Apple's Multipeer Connectivity through a small Swift plugin of our own.
-Relayer (Rust): `axum`, `tokio`, `reqwest`, `ed25519-dalek`, `serde` / `serde_json`, `sha2`, `base64`, `bs58`, `hex`, `rand`, `regex`, `chrono`.
-Bond contract (Rust): `near-sdk`. Shared voucher crate: `serde_json`, `sha2`, `bs58`, `base64`, `hex`, with `ed25519-dalek` and `rand` behind the `sign` feature.
-
-The gossip layer, the Multipeer plugin, the NEP-413 implementation in Dart, the relayer and the bond contract are written here, not taken from a library. The code was written with Claude Code as a pair programmer.
-
 ## Hackathon notes
+
+The gossip layer, the Multipeer plugin, the NEP-413 implementation in Dart, the relayer and the bond contract are written here, not taken from a library; the dependencies are in `app/pubspec.yaml` and the `Cargo.toml` files. The code was written with Claude Code as a pair programmer.
 
 The author works at [qaul](https://qaul.net), an offline messenger, as an engineer focused on networking and cryptography; store-and-forward over local radios is the day job, and that is why the mesh here is written rather than imported. The author is also part of [ainek](https://github.com/sadabaevb/ainek), another project in the same hackathon. All code in this repository was written between 2026-11-05 and 2026-11-14 UTC; there is no earlier baseline to diff against.
 
