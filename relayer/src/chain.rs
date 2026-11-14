@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::future::Future;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -73,10 +74,17 @@ pub trait Chain: Send + Sync + 'static {
 /// The most gas one transaction may use; the call gets all of it and is charged only what it burns.
 const GAS: u64 = 300_000_000_000_000;
 
+/// The public nodes, in order. They rate-limit, and one name failing to resolve is enough to stop a
+/// relayer that knows only that one; a provider with a key of your own goes first in NEAR_RPC.
+const DEFAULT_RPC: &str = "https://rpc.mainnet.near.org,https://free.rpc.fastnear.com";
+
 /// intents.near, and the bond contract if there is one, on mainnet over JSON-RPC.
 pub struct NearChain {
     http: reqwest::Client,
-    rpc: String,
+    /// Nodes to ask, in order of preference. One that cannot be reached is skipped, and the next
+    /// call starts with the one that answered last.
+    rpc: Vec<String>,
+    preferred: AtomicUsize,
     account: String,
     key: SigningKey,
     bond_contract: String,
@@ -97,7 +105,14 @@ impl NearChain {
                 .timeout(Duration::from_secs(60))
                 .build()
                 .expect("an HTTP client"),
-            rpc: rpc.unwrap_or_else(|| "https://rpc.mainnet.near.org".into()),
+            rpc: rpc
+                .as_deref()
+                .unwrap_or(DEFAULT_RPC)
+                .split(',')
+                .map(|url| url.trim().to_owned())
+                .filter(|url| !url.is_empty())
+                .collect(),
+            preferred: AtomicUsize::new(0),
             account,
             key,
             bond_contract,
@@ -106,7 +121,7 @@ impl NearChain {
     }
 
     /// The relayer account from RELAYER_ACCOUNT and RELAYER_KEY, the bond contract from
-    /// BOND_CONTRACT, on NEAR_RPC if that is set.
+    /// BOND_CONTRACT, on the nodes in NEAR_RPC (comma separated, in order of preference) if that is set.
     pub fn from_env() -> Result<Self, &'static str> {
         let usage = "set RELAYER_ACCOUNT, RELAYER_KEY (ed25519:...) and BOND_CONTRACT";
         let key = env("RELAYER_KEY").as_deref().and_then(secret_key).ok_or(usage)?;
@@ -117,19 +132,39 @@ impl NearChain {
 
     async fn call(&self, method: &str, params: Value) -> Result<Value, ChainError> {
         let request = json!({ "jsonrpc": "2.0", "id": "nearby", "method": method, "params": params });
-        let sent = async {
-            self.http
-                .post(&self.rpc)
-                .json(&request)
-                .send()
-                .await?
-                .json::<Value>()
-                .await
-        };
-        // Without the URL: it can hold the RPC provider's API key, and this text is sent on to phones.
-        let mut response = sent
-            .await
-            .map_err(|e| ChainError::Unknown(e.without_url().to_string()))?;
+        let first = self.preferred.load(Ordering::Relaxed);
+        let mut failed = String::new();
+        let mut answer = None;
+        for step in 0..self.rpc.len() {
+            let at = (first + step) % self.rpc.len();
+            let sent = async {
+                self.http
+                    .post(&self.rpc[at])
+                    .json(&request)
+                    .send()
+                    .await?
+                    .json::<Value>()
+                    .await
+            };
+            match sent.await {
+                Ok(response) => {
+                    self.preferred.store(at, Ordering::Relaxed);
+                    answer = Some(response);
+                    break;
+                }
+                // Without the URL: it can hold the RPC provider's API key, and this text is sent on to phones.
+                Err(e) => {
+                    // A broadcast that may have reached the node is not made again elsewhere on a
+                    // timeout: only when the node was never reached.
+                    let reached = !e.is_connect();
+                    failed = e.without_url().to_string();
+                    if method == "send_tx" && reached {
+                        break;
+                    }
+                }
+            }
+        }
+        let mut response = answer.ok_or(ChainError::Unknown(failed))?;
         match response.get_mut("result") {
             // Some nodes report a failed view inside the result rather than as an RPC error.
             Some(result) if result.get("error").is_none() => Ok(result.take()),
@@ -492,6 +527,40 @@ mod tests {
             !said.contains("PARSE") && !said.contains("Parse") && !said.contains("eserializ"),
             "{said}"
         );
+    }
+
+    // One public node failing to answer (or to resolve) must not stop the relayer.
+    #[tokio::test]
+    async fn a_node_that_cannot_be_reached_is_skipped_for_the_next_and_remembered() {
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::post(|| async {
+                axum::Json(json!({ "jsonrpc": "2.0", "id": "nearby", "result": { "ok": true } }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let dead = "http://127.0.0.1:1";
+        let key = SigningKey::from_bytes(&rand::random());
+        let chain = NearChain::new(
+            "a.near".into(),
+            key.clone(),
+            Some(format!("{dead}, {live}")),
+            "b.near".into(),
+        );
+        assert_eq!(chain.call("status", json!([])).await.unwrap(), json!({ "ok": true }));
+        assert_eq!(
+            chain.preferred.load(Ordering::Relaxed),
+            1,
+            "the next call starts with the live one"
+        );
+
+        let nothing = NearChain::new("a.near".into(), key, Some(dead.into()), "b.near".into());
+        assert!(matches!(
+            nothing.call("status", json!([])).await,
+            Err(ChainError::Unknown(_))
+        ));
     }
 
     // The relayer's own transaction can be turned away before it runs. Phones are shown the reason,

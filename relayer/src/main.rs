@@ -5,7 +5,7 @@
 //!   ATTESTATION_SK                hex ed25519 seed that signs balance attestations. The start-up
 //!                                 line and GET / give the public key to pin in the app. Keep it
 //!                                 separate from RELAYER_KEY.
-//! Optional: NEAR_RPC, PORT (default 8787),
+//! Optional: NEAR_RPC (nodes, comma separated, in order of preference), PORT (default 8787),
 //!   STATE_FILE      where double-spends found are kept across restarts (without it they are lost),
 //!   SKIP_PREFLIGHT  set to 1 to start without checking the account, key and bond contract first.
 use chrono::Utc;
