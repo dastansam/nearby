@@ -190,6 +190,41 @@ void main() {
     expect((await stored(v)).outcome, isNull);
   });
 
+  // What the user sees in airplane mode. With nothing to upload an attempt makes no request, so
+  // without this the phone goes on saying it is online; and once the signal is back, a payment
+  // waiting on the phone must not sit there until the next half minute.
+  test('a phone with nothing to upload still notices the signal going, and settles the moment it is back', () async {
+    var signal = true;
+    final changes = <String?>[];
+    late final Gateway phone;
+    phone = Gateway(store, 'https://relayer.test', client: MockClient((request) async {
+      if (!signal) throw http.ClientException('Failed host lookup');
+      if (request.url.path == '/healthz') return http.Response('{"ok":true}', 200);
+      final vouchers = jsonDecode(request.body)['vouchers'] as List;
+      uploads.add(vouchers);
+      return http.Response(
+          jsonEncode({'results': vouchers.map((_) => {'status': 'settled', 'tx': 'tx1', 'block': 5000}).toList()}), 200);
+    }), onChange: () => changes.add(phone.problem));
+
+    await phone.checkSignal(); // online, nothing to upload: the first attempt goes through
+    expect(phone.problem, isNull);
+
+    signal = false;
+    await phone.checkSignal();
+    expect(phone.problem, 'No signal');
+    expect(changes.last, 'No signal', reason: 'the screen is told, not left showing Online');
+
+    final paid = await voucher();
+    await store.put(paid, VoucherKind.received); // taken offline
+    signal = true;
+    await phone.checkSignal();
+    expect(phone.problem, isNull);
+    expect(uploads, [
+      [paid]
+    ]);
+    expect((await stored(paid)).outcome, Outcome.settled);
+  });
+
   // The demo's "C turns on data and the voucher settles": nobody presses anything.
   test('once started, a voucher that arrives while online is uploaded right away', () async {
     final first = Completer<void>(), second = Completer<void>();

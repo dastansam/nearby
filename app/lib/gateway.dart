@@ -34,9 +34,10 @@ class Gateway {
   final void Function()? onChange;
 
   /// Why the last attempt did not go through, for the user to read; null when it did.
-  String? problem = 'No signal';
+  String? problem = _noSignal;
+  static const _noSignal = 'No signal';
 
-  Timer? _timer;
+  Timer? _timer, _pulse;
   StreamSubscription<void>? _puts;
   bool _busy = false, _again = false;
 
@@ -44,12 +45,32 @@ class Gateway {
   /// a signal settles for everyone, and no phone knows in advance that it will be the one.
   void start() {
     _timer = Timer.periodic(const Duration(seconds: 30), (_) => _attempt());
+    _pulse = Timer.periodic(const Duration(seconds: 4), (_) => checkSignal());
     _puts = _store.puts.listen((_) => _attempt());
     _attempt();
   }
 
+  /// Asks the relayer the cheapest question there is. An attempt with nothing to upload makes no
+  /// request, so it cannot tell that the signal has gone; and a phone that has just got it back
+  /// should settle now, not at the next half minute.
+  Future<void> checkSignal() async {
+    if (_busy) return; // an attempt is talking to the relayer and will say how it went
+    bool reached;
+    try {
+      reached = (await _client.get(Uri.parse('$_base/healthz')).timeout(const Duration(seconds: 3))).statusCode == 200;
+    } catch (_) {
+      reached = false;
+    }
+    if (reached && problem == _noSignal) return _attempt();
+    if (!reached && problem == null) {
+      problem = _noSignal;
+      onChange?.call();
+    }
+  }
+
   Future<void> stop() async {
     _timer?.cancel();
+    _pulse?.cancel();
     await _puts?.cancel();
   }
 
@@ -68,9 +89,9 @@ class Gateway {
         await _refreshAttestationIfOld();
         problem = null;
       } on http.ClientException {
-        problem = 'No signal'; // the usual case, and the reason the mesh exists
+        problem = _noSignal; // the usual case, and the reason the mesh exists
       } on TimeoutException {
-        problem = 'No signal';
+        problem = _noSignal;
       } catch (e) {
         // A wrong relayer address or a relayer fault would otherwise look like a phone with no signal.
         problem = 'Relayer problem: $e';
