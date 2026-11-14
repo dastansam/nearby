@@ -12,6 +12,7 @@ import 'mesh/nearby_transport.dart';
 import 'mesh/transport.dart';
 import 'screens/pay.dart';
 import 'screens/receive.dart';
+import 'screens/topup.dart';
 import 'store.dart';
 import 'theme.dart';
 import 'voucher/attestation.dart';
@@ -223,14 +224,38 @@ class _HomeScreenState extends State<HomeScreen> {
                   Amount(attested == null || stale ? '—' : formatUsdc(_budget.toString()),
                       size: 60, color: scheme.onPrimaryContainer),
                   const SizedBox(height: 12),
-                  Text(
-                    attested == null
-                        ? 'Go online once to load it. Payees accept payments only against it.'
-                        : stale
-                            ? 'Out of date. Go online, then tap to refresh.'
-                            : 'As of ${TimeOfDay.fromDateTime(attested.asOf.toLocal()).format(context)} · tap to refresh',
-                    style: TextStyle(fontSize: 14, color: scheme.onPrimaryContainer.withValues(alpha: 0.8)),
-                  ),
+                  Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                    Expanded(
+                      child: Text(
+                        attested == null
+                            ? 'Go online once to load it. Payees accept payments only against it.'
+                            : stale
+                                ? 'Out of date. Go online, then tap to refresh.'
+                                // What the chain held when last asked; the figure above is that less what has been paid since.
+                                : '${formatUsdc(attested.balance.toString())} on chain at '
+                                    '${TimeOfDay.fromDateTime(attested.asOf.toLocal()).format(context)} · tap to refresh',
+                        style: TextStyle(fontSize: 14, color: scheme.onPrimaryContainer.withValues(alpha: 0.8)),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    TextButton.icon(
+                      onPressed: () => _flow(() async {
+                        await Navigator.push<bool>(
+                            context, MaterialPageRoute(builder: (_) => TopUpScreen(accountId: wallet.accountId)));
+                        // However the screen was left: the money may have arrived while it was open.
+                        await _refreshBalance();
+                      }),
+                      style: TextButton.styleFrom(
+                        foregroundColor: scheme.primaryContainer,
+                        backgroundColor: scheme.onPrimaryContainer,
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(99)),
+                        textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+                      ),
+                      icon: const Icon(Icons.add, size: 18),
+                      label: const Text('Top up'),
+                    ),
+                  ]),
                 ]),
               ),
               const SizedBox(height: 12),
