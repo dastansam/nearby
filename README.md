@@ -62,6 +62,8 @@ flutter build apk --debug \
 
 For iPhones, with Xcode signed into the developer account: `flutter run -d <iphone>` with the same `--dart-define`s, or `flutter build ipa` for TestFlight. The project carries our signing team; another team changes it in Xcode under Signing & Capabilities.
 
+Payees refuse a payer with less than 5 NEAR bonded; `--dart-define=MIN_BOND_NEAR=1` lowers that for one build, which is how the demo build is made: cheating costs 1 NEAR there, not 5.
+
 Debug builds may use plain `http`; release and TestFlight builds need `https`. An Android release is signed with the debug key unless `app/android/key.properties` (`storeFile`, `storePassword`, `keyAlias`, `keyPassword`; git-ignored) names your own key: sign the one you publish. Without `RELAYER_URL` the app still pays, receives and relays, but never uploads. Without `RELAYER_KEY` there is no relayer whose balance attestations the app trusts, so payees skip the balance check (the receive screen says so) and enforce only the 25 USDC limit and the sequence numbers.
 
 Tests: `cargo test` at the root (relayer and voucher), `cargo test -p nearby-bond`, `flutter test` in `app/`. `cargo test -p nearby-relayer live_ -- --ignored` asks a real mainnet node two questions for free: does it accept our `send_tx` encoding, and do the start-up checks name their mistakes.
