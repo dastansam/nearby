@@ -137,6 +137,10 @@ async fn attest<C: Chain>(State(relayer): State<Arc<Relayer<C>>>, Path(account):
         Ok(answers) => answers,
         Err(e) => return refuse(StatusCode::INTERNAL_SERVER_ERROR, e.reason()),
     };
+    log(format!(
+        "attested {account}: balance {}, bond {bond}",
+        read.value
+    ));
     let attestation = Attestation {
         account,
         token: USDC_TOKEN.into(),
