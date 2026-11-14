@@ -219,8 +219,9 @@ mod tests {
         assert_eq!(transfer(&message("seq:")).unwrap().sequence(), None);
     }
 
-    // A proof of double-spending pays the bond to a voucher's receiver; a message with two intents
-    // or a non-transfer has no single receiver, so it is not a NearBy payment.
+    // A NearBy payment is one transfer to one receiver: that is what a payee checks, what the relayer
+    // settles, and what the bond contract logs when it slashes (the forfeited bond stays in the
+    // contract). A message with two intents or a non-transfer is not one.
     #[test]
     fn only_a_lone_transfer_is_a_payment() {
         let mut two = message("seq:1");

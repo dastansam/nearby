@@ -74,11 +74,12 @@ class PaymentRequest {
 
 /// Payer side, offline: sign a voucher that pays exactly [request]. [seq] and [prev] place it in
 /// the payer's sequence chain (see nextSequence in guards.dart); the defaults are a first payment.
-Future<Map<String, dynamic>> signPayment(SimpleKeyPair key, PaymentRequest request, {int seq = 1, String prev = '00'}) =>
+Future<Map<String, dynamic>> signPayment(SimpleKeyPair key, PaymentRequest request,
+        {int seq = 1, String prev = '00', DateTime? now}) =>
     signVoucher(
     key,
     [Transfer(request.receiverId, {request.token: request.amount}, memo: '${request.memoTag} seq:$seq prev:$prev')],
-    DateTime.now().add(voucherLifetime),
+    (now ?? DateTime.now()).add(voucherLifetime),
     makeNonce());
 
 /// The payee's offline checks on a scanned voucher. Returns the voucher if it is a valid

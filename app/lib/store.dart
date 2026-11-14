@@ -91,31 +91,26 @@ class VoucherStore {
   /// before they scan it. Storing that identical voucher as their own then succeeds.
   Future<bool> put(Map<String, dynamic> voucher, VoucherKind kind, {int hops = 0}) async {
     final key = voucherKey(voucher), json = jsonEncode(voucher);
-    // The hop count the voucher is stored with, or null if it was not stored.
-    final storedHops = await _db.transaction<int?>((txn) async {
-      final held = await txn.query('vouchers', columns: ['kind', 'hops', 'json'], where: 'key = ?', whereArgs: [key]);
+    // The voucher as stored, or null if it was not. Built from what the transaction read, and
+    // told to listeners straight after it: transactions run one at a time, so nothing awaited in
+    // between can let a later put() tell its listeners first.
+    final stored = await _db.transaction<StoredVoucher?>((txn) async {
+      final held = await txn.query('vouchers', columns: _columns, where: 'key = ?', whereArgs: [key]);
       if (held.isEmpty) {
-        await txn.insert('vouchers', {
-          'key': key,
-          'kind': kind.name,
-          'hops': hops,
-          'json': json,
-          'created_at': DateTime.now().millisecondsSinceEpoch,
-        });
-        return hops;
+        await txn.insert('vouchers', {'key': key, 'kind': kind.name, 'hops': hops, 'json': json, 'created_at': DateTime.now().millisecondsSinceEpoch});
+        return (kind: kind, hops: hops, voucher: voucher, outcome: null, tx: null, settledBlock: null);
       }
       final claim = held.single['kind'] == VoucherKind.relayed.name &&
           kind != VoucherKind.relayed &&
           held.single['json'] == json;
-      if (claim) await txn.update('vouchers', {'kind': kind.name}, where: 'key = ?', whereArgs: [key]);
-      return claim ? held.single['hops'] as int : null;
+      if (!claim) return null;
+      await txn.update('vouchers', {'kind': kind.name}, where: 'key = ?', whereArgs: [key]);
+      // A claimed voucher may have been answered about already: the gateway uploads it as soon as
+      // it is carried. Tell it as it stands.
+      return _stored({...held.single, 'kind': kind.name});
     });
-    if (storedHops == null) return false;
-    // A claimed voucher may have been answered about already: the gateway uploads it as soon as it
-    // is carried. Tell it as it stands.
-    _puts.add(kind == VoucherKind.relayed
-        ? (kind: kind, hops: storedHops, voucher: voucher, outcome: null, tx: null, settledBlock: null)
-        : (await get(key))!);
+    if (stored == null) return false;
+    _puts.add(stored);
     return true;
   }
 
@@ -159,18 +154,27 @@ class VoucherStore {
   Future<Map<String, String?>> held() async =>
       {for (final r in await _db.query('vouchers', columns: ['key', 'receipt'])) r['key'] as String: r['receipt'] as String?};
 
+  /// Every voucher key without a final answer. One column: the mesh asks this on every connection.
+  Future<List<String>> unanswered() async =>
+      [for (final r in await _db.query('vouchers', columns: ['key'], where: 'outcome IS NULL')) r['key'] as String];
+
   /// Newest first.
   Future<List<StoredVoucher>> all() => _select();
 
   Future<List<StoredVoucher>> _select({String? where, List<Object?>? whereArgs}) async => [
-        for (final r in await _db.query('vouchers', where: where, whereArgs: whereArgs, orderBy: 'created_at DESC'))
-          (
-            kind: VoucherKind.values.byName(r['kind'] as String),
-            hops: r['hops'] as int,
-            voucher: jsonDecode(r['json'] as String) as Map<String, dynamic>,
-            outcome: r['outcome'] == null ? null : Outcome.values.byName(r['outcome'] as String),
-            tx: r['tx'] as String?,
-            settledBlock: r['settled_block'] as int?,
-          )
+        for (final r in await _db.query('vouchers', columns: _columns, where: where, whereArgs: whereArgs, orderBy: 'created_at DESC'))
+          _stored(r)
       ];
+
+  /// What [_stored] reads; not the receipt, which only the mesh asks for (see [held]).
+  static const _columns = ['kind', 'hops', 'json', 'outcome', 'tx', 'settled_block'];
+
+  static StoredVoucher _stored(Map<String, Object?> r) => (
+        kind: VoucherKind.values.byName(r['kind'] as String),
+        hops: r['hops'] as int,
+        voucher: jsonDecode(r['json'] as String) as Map<String, dynamic>,
+        outcome: r['outcome'] == null ? null : Outcome.values.byName(r['outcome'] as String),
+        tx: r['tx'] as String?,
+        settledBlock: r['settled_block'] as int?,
+      );
 }

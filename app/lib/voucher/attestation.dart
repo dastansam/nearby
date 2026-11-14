@@ -74,6 +74,7 @@ Future<bool> keepReceipt(VoucherStore store, Map<String, dynamic> voucher, dynam
 
 /// The payload of [signed], once the trusted relayer's signature over [domain] + payload checks out. Throws otherwise.
 Future<String> _statement(String domain, dynamic signed) async {
+  if (relayerKey.isEmpty) throw StateError('this build trusts no relayer');
   final payload = signed['payload'] as String;
   final ok = await Ed25519().verify(utf8.encode(domain + payload),
       signature: Signature(untag(signed['signature']), publicKey: SimplePublicKey(untag(relayerKey), type: KeyPairType.ed25519)));

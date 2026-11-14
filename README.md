@@ -29,7 +29,7 @@ near contract call-function as-transaction bond.you.near bond_for json-args '{"a
   prepaid-gas '30 Tgas' attached-deposit '5 NEAR' sign-as you.near network-config mainnet sign-with-keychain send
 ```
 
-At least 1 NEAR per call. Whoever paid first owns the bond: `unbond(account)` then `withdraw(account)` 7 days later return it to them. Views: `bond_of` (what backs payments now: 0 while unbonding or banned), `at_stake` (what a proof would take: the bond, unbonding or not) and `is_banned`. `slash(a, b)` takes two signed vouchers; a key with nothing at stake is turned away, not banned.
+At least 1 NEAR per call. Whoever paid first owns the bond and alone may add to it (it all leaves with them): `unbond(account)` then `withdraw(account)` 7 days later return it to them. Views: `bond_of` (what backs payments now: 0 while unbonding or banned), `at_stake` (what a proof would take: the bond, unbonding or not) and `is_banned`. `slash(a, b)` takes two signed vouchers; a key with nothing at stake is turned away, not banned.
 
 Relayer, from `relayer/`:
 
@@ -74,7 +74,7 @@ Not yet proven: no voucher has settled with a funded account (only dry runs agai
 
 The relay is per platform: iPhones find iPhones, Android phones find Android phones, and the two never find each other. Everything else, including the QR path, works across the two.
 
-Double-spending offline is bounded, provable and punished, not prevented. A merchant with a signal need not take the risk: the payment is uploaded the moment it is accepted and the receive screen shows the chain's answer within seconds, settled, refused for good, or turned down for now with the reason (the payer's balance is short). A payer can still overspend across merchants who are offline and have not seen each other's vouchers, up to 25 USDC each, for as long as their attestation lasts. Two vouchers with one sequence number prove it; the relayer hands the pair to the bond contract, and the key forfeits its bond (5 NEAR or more) and is banned. The forfeited bond stays in the contract: paying it to the vouchers' receivers would let a cheat name their own accounts and slash themselves, and compensating the merchant left unpaid needs settlement evidence the contract does not have. The contract has 15 unit tests and has not been deployed or slashed on mainnet yet; the bond is in NEAR while the budget is in USDC, so the two are not compared, and a payer cheating many merchants in one afternoon can still take more than the bond.
+Double-spending offline is bounded, provable and punished, not prevented. A merchant with a signal need not take the risk: the payment is uploaded the moment it is accepted and the receive screen shows the chain's answer within seconds, settled, refused for good, or turned down for now with the reason (the payer's balance is short). A payer can still overspend across merchants who are offline and have not seen each other's vouchers, up to 25 USDC each, for as long as their attestation lasts. Two vouchers with one sequence number prove it; the relayer hands the pair to the bond contract, and the key forfeits its bond (5 NEAR or more) and is banned. The forfeited bond stays in the contract: paying it to the vouchers' receivers would let a cheat name their own accounts and slash themselves, and compensating the merchant left unpaid needs settlement evidence the contract does not have. The contract has 19 unit tests and has not been deployed or slashed on mainnet yet; the bond is in NEAR while the budget is in USDC, so the two are not compared, and a payer cheating many merchants in one afternoon can still take more than the bond.
 
 Settlements travel back into the mesh: the relayer signs a receipt `{voucher, tx, block}` for each voucher it settles, and a phone that holds one hands it to any peer still carrying that voucher, which marks it settled and stops carrying it. A merchant whose phone stays offline learns of a customer's earlier payment settling when the customer (or anyone who synced) comes back, and until then counts it against them: a returning customer can still be refused before that happens, although their new attested balance already reflects the payment.
 
@@ -99,6 +99,7 @@ Everything in the first table runs in the automated tests (Rust: relayer, bond c
 | --- | --- |
 | One funded settlement and one slash on mainnet, with explorer links | Needs a funded offline account and the bond contract deployed |
 | Running on phones: Android (Nearby Connections) and iPhone (Multipeer) | Only tests so far |
+| Bond ownership bound to the payer's key | Today whoever bonds an account first owns its bond, so a stranger can bond one for 1 NEAR and keep its wallet from bonding it |
 | Compensating the unpaid merchant from a forfeited bond | The contract has no settlement evidence; paying the vouchers' receivers would let a cheat slash themselves |
 | Hardware-held offline keys (StrongBox / Secure Enclave), attested by the relayer | Stretch in the spec |
 | Pruning settled and expired vouchers from the store | Nothing is pruned yet; relays refuse vouchers valid longer than 7 days as a stopgap |
