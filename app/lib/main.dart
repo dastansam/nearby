@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'gateway.dart';
 import 'mesh/gossip.dart';
@@ -143,6 +144,17 @@ class _HomeScreenState extends State<HomeScreen> {
     final messenger = ScaffoldMessenger.of(context);
     await Clipboard.setData(ClipboardData(text: text));
     messenger.showSnackBar(SnackBar(content: Text(said)));
+  }
+
+  /// Shows a settled payment's transaction on the explorer, inside the app.
+  Future<void> _openTx(String tx) async {
+    final link = 'https://nearblocks.io/txns/$tx';
+    try {
+      if (await launchUrl(Uri.parse(link), mode: LaunchMode.inAppBrowserView)) return;
+    } catch (_) {
+      // No browser to hand it to: the link is still worth having.
+    }
+    await _copy(link, 'Could not open the explorer. Link copied.');
   }
 
   Future<void> _reloadVouchers() async {
@@ -301,7 +313,7 @@ class _HomeScreenState extends State<HomeScreen> {
     return InkWell(
       borderRadius: BorderRadius.circular(16),
       onTap: v.tx != null
-          ? () => _copy('https://nearblocks.io/txns/${v.tx}', 'Transaction link copied')
+          ? () => _openTx(v.tx!)
           // Re-showing beats re-signing: a second voucher for one purchase would settle twice.
           : sent && pending
               ? () => showVoucher(context, _store, v.voucher)
@@ -323,7 +335,7 @@ class _HomeScreenState extends State<HomeScreen> {
               const SizedBox(height: 2),
               Text(
                 switch (v.outcome) {
-                  Outcome.settled => v.tx == null ? 'Settled' : 'Settled · tap to copy the transaction link',
+                  Outcome.settled => v.tx == null ? 'Settled' : 'Settled · tap to see it on the explorer',
                   Outcome.failed => 'Did not settle',
                   // Another phone may have settled it in time; only the relayer can say.
                   null when !pending => 'Expired · not known to have settled',
